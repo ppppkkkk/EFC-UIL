@@ -86,12 +86,12 @@ if __name__ == '__main__':
         emb_attr = np.concatenate((emb_c,emb_m,emb_w,emb_t),axis=-1)
         emb_all = np.concatenate((emb_c,emb_m,emb_w,emb_t,emb_s),axis=-1)
         '''
-        #emb_c, emb_t, emb_s = pickle.load(open(fname, 'rb'))
-        emb_c, emb_s = pickle.load(open(fname, 'rb'))
-        emb_attr = np.concatenate((emb_c),axis=-1)
-        emb_all = np.concatenate((emb_c,emb_s),axis=-1)
-        # emb_attr = np.concatenate((emb_c,emb_t),axis=-1)
-        # emb_all = np.concatenate((emb_c,emb_t,emb_s),axis=-1)
+        emb_c, emb_t, emb_s = pickle.load(open(fname, 'rb'))
+        # emb_c, emb_s = pickle.load(open(fname, 'rb'))
+        # emb_attr = np.concatenate((emb_c),axis=-1)
+        # emb_all = np.concatenate((emb_c,emb_s),axis=-1)
+        emb_attr = np.concatenate((emb_c,emb_t),axis=-1)
+        emb_all = np.concatenate((emb_c,emb_t,emb_s),axis=-1)
         for model in [2]:
             n_train = 200
             emb = [emb_attr,emb_s,emb_all][model]
