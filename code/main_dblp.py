@@ -334,11 +334,15 @@ class TransformerWithMoE(nn.Module):
         return x
 
 
-def generate_target(emb_m, emb_s, anchors):
+def generate_target(emb_m, emb_s, anchors, num_negative_samples=1, save_path=None):
     attribute_pairs = []
     structure_pairs = []
     labels = []
 
+    anchor_keys = list(anchors.keys())
+    all_nodes = list(range(len(emb_m)))
+
+    # 生成正样本（锚点对）
     for k, v in anchors.items():
         emb_k_m = emb_m[k]
         emb_v_m = emb_m[v]
@@ -349,43 +353,95 @@ def generate_target(emb_m, emb_s, anchors):
         structure_pairs.append([emb_k_s, emb_v_s])
         labels.append(1)
 
-    return np.array(attribute_pairs), np.array(structure_pairs), np.array(labels)
+        # 生成负样本（非锚点对）
+        for _ in range(num_negative_samples):
+            neg_v = np.random.choice(all_nodes)
+            while neg_v in anchors.values():  # 确保负样本不是锚点
+                neg_v = np.random.choice(all_nodes)
+
+            neg_emb_v_m = emb_m[neg_v]
+            neg_emb_v_s = emb_s[neg_v]
+
+            attribute_pairs.append([emb_k_m, neg_emb_v_m])
+            structure_pairs.append([emb_k_s, neg_emb_v_s])
+            labels.append(0)
+
+    attribute_pairs = np.array(attribute_pairs)
+    structure_pairs = np.array(structure_pairs)
+    labels = np.array(labels)
+
+    # 如果提供了保存路径，则保存生成的目标对
+    if save_path:
+        with open(save_path, 'wb') as f:
+            pickle.dump((attribute_pairs, structure_pairs, labels), f)
+        print(f"Data saved to {save_path}")
+
+    return attribute_pairs, structure_pairs, labels
 
 
-def train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=10, learning_rate=0.001):
+class DistanceBasedLogits(nn.Module):
+    def __init__(self):
+        super(DistanceBasedLogits, self).__init__()
+        self.fc = nn.Linear(1, 1)
+
+    def forward(self, x1, x2):
+        distance = torch.norm(x1 - x2, p=2, dim=-1, keepdim=True)  # 欧氏距离
+        logits = self.fc(distance)
+        return logits
+
+
+def train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=10, learning_rate=0.001, batch_size=32):
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
+    # 使用DistanceBasedLogits
+    distance_model = DistanceBasedLogits()
+    distance_optimizer = optim.Adam(distance_model.parameters(), lr=learning_rate)
+
     for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0.0  # 初始化为浮点数
+        distance_model.train()
+        total_loss = 0.0
 
-        for (attr_pair, struct_pair, label) in zip(attribute_pairs, structure_pairs, labels):
-            emb_k_m = torch.tensor(attr_pair[0], dtype=torch.float32).unsqueeze(0)
-            emb_v_m = torch.tensor(attr_pair[1], dtype=torch.float32).unsqueeze(0)
-            emb_k_s = torch.tensor(struct_pair[0], dtype=torch.float32).unsqueeze(0)
-            emb_v_s = torch.tensor(struct_pair[1], dtype=torch.float32).unsqueeze(0)
+        # 随机打乱数据
+        permutation = np.random.permutation(len(labels))
+        attribute_pairs = attribute_pairs[permutation]
+        structure_pairs = structure_pairs[permutation]
+        labels = labels[permutation]
 
-            # 单独输入两个嵌入，不合并
-            output_k = model(emb_k_m, emb_k_s)
-            output_v = model(emb_v_m, emb_v_s)
+        for i in range(0, len(attribute_pairs), batch_size):
+            batch_attr_pairs = attribute_pairs[i:i+batch_size]
+            batch_struct_pairs = structure_pairs[i:i+batch_size]
+            batch_labels = labels[i:i+batch_size]
 
-            logits = torch.cosine_similarity(output_k, output_v, dim=-1)
-            logits = logits.view(-1)
+            batch_loss = 0.0
 
-            label_tensor = torch.tensor([label], dtype=torch.float32)
+            for (attr_pair, struct_pair, label) in zip(batch_attr_pairs, batch_struct_pairs, batch_labels):
+                emb_k_m = torch.tensor(attr_pair[0], dtype=torch.float32).unsqueeze(0)
+                emb_v_m = torch.tensor(attr_pair[1], dtype=torch.float32).unsqueeze(0)
+                emb_k_s = torch.tensor(struct_pair[0], dtype=torch.float32).unsqueeze(0)
+                emb_v_s = torch.tensor(struct_pair[1], dtype=torch.float32).unsqueeze(0)
 
-            loss = criterion(logits, label_tensor)
+                # 将属性嵌入和结构嵌入进行合并（例如，拼接或相加）
+                combined_emb_k = torch.cat((emb_k_m, emb_k_s), dim=-1)
+                combined_emb_v = torch.cat((emb_v_m, emb_v_s), dim=-1)
+
+                # 使用DistanceBasedLogits生成logits
+                logits = distance_model(combined_emb_k, combined_emb_v).squeeze(-1)
+
+                label_tensor = torch.tensor([label], dtype=torch.float32)
+
+                loss = criterion(logits, label_tensor)
+                batch_loss += loss
 
             optimizer.zero_grad()
-            total_loss += loss.item()  # 累加损失
-            loss.backward()
+            distance_optimizer.zero_grad()
+            total_loss += batch_loss.item()
+            batch_loss.backward()
             optimizer.step()
+            distance_optimizer.step()
 
-        # 打印平均损失
-        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss/len(attribute_pairs):.4f}')
+        print(f'Epoch [{epoch}/{num_epochs}], Loss: {total_loss/len(attribute_pairs):.4f}')
 
-    # 打印最终的全局权重
     final_weights = model.layers[0][2].router.fc.weight.detach().numpy()
     print(f"Final global weights shape after training: {final_weights.shape}")
 
@@ -481,15 +537,21 @@ if __name__ == '__main__':
         print(f"emb_s shape: {emb_s.shape}")
         emb_all = np.concatenate((emb_m, emb_s), axis=-1)
 
-        # 生成目标对
-        attribute_pairs, structure_pairs, labels = generate_target(emb_m, emb_s, anchors)
+        generated_targets_save_path = 'generated_targets.pkl'
 
-        # 初始化 TransformerWithMoE 模型
+        if os.path.exists(generated_targets_save_path):
+            with open(generated_targets_save_path, 'rb') as f:
+                attribute_pairs, structure_pairs, labels = pickle.load(f)
+            print(f"Data loaded from {generated_targets_save_path}")
+        else:
+            attribute_pairs, structure_pairs, labels = generate_target(emb_m, emb_s, anchors, num_negative_samples=1,
+                                                                       save_path=generated_targets_save_path)
+
         model = TransformerWithMoE(input_dim=768, hidden_dim=512, output_dim=768, num_experts=4, num_layers=6)
         print(f"Model initialized: {type(model)}")
 
         # 训练模型
-        train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=0, learning_rate=0.001)
+        train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=1000, learning_rate=0.001)
 
         # 对模型进行测试和评估
         for model_idx in [0]:
