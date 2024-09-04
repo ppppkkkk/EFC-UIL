@@ -339,10 +339,8 @@ def generate_target(emb_m, emb_s, anchors, num_negative_samples=1, save_path=Non
     structure_pairs = []
     labels = []
 
-    anchor_keys = list(anchors.keys())
     all_nodes = list(range(len(emb_m)))
 
-    # 生成正样本（锚点对）
     for k, v in anchors.items():
         emb_k_m = emb_m[k]
         emb_v_m = emb_m[v]
@@ -353,10 +351,9 @@ def generate_target(emb_m, emb_s, anchors, num_negative_samples=1, save_path=Non
         structure_pairs.append([emb_k_s, emb_v_s])
         labels.append(1)
 
-        # 生成负样本（非锚点对）
         for _ in range(num_negative_samples):
             neg_v = np.random.choice(all_nodes)
-            while neg_v in anchors.values():  # 确保负样本不是锚点
+            while neg_v in anchors.values():
                 neg_v = np.random.choice(all_nodes)
 
             neg_emb_v_m = emb_m[neg_v]
@@ -379,71 +376,86 @@ def generate_target(emb_m, emb_s, anchors, num_negative_samples=1, save_path=Non
     return attribute_pairs, structure_pairs, labels
 
 
-class DistanceBasedLogits(nn.Module):
-    def __init__(self):
-        super(DistanceBasedLogits, self).__init__()
-        self.fc = nn.Linear(1, 1)
+def print_expert_weights(router):
+    """
+    打印专家的选择权重
+    :param router: MoE 模型中的 Router 模块
+    """
+    with torch.no_grad():
+        # 获取 router 的权重
+        expert_weights = router.fc.weight.detach().cpu().numpy()
+        print("专家权重：")
+        print(expert_weights)
+        print("平均选择比率：")
+        print(np.mean(expert_weights, axis=0))
 
-    def forward(self, x1, x2):
-        distance = torch.norm(x1 - x2, p=2, dim=-1, keepdim=True)  # 欧氏距离
-        logits = self.fc(distance)
-        return logits
 
-
-def train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=10, learning_rate=0.001, batch_size=32):
+def train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=10, learning_rate=0.001, batch_size=32, device='cpu'):
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
 
-    # 使用DistanceBasedLogits
-    distance_model = DistanceBasedLogits()
-    distance_optimizer = optim.Adam(distance_model.parameters(), lr=learning_rate)
+    clip_value = 1.0
+
+    model.to(device)
+
+    print("训练前的专家权重：")
+    print_expert_weights(model.layers[0][2].router)
+
+    initial_router_weights_sum = torch.sum(model.layers[0][2].router.fc.weight).item()
+    print(f"训练前的Router权重总和：{initial_router_weights_sum}")
 
     for epoch in range(num_epochs):
-        distance_model.train()
+        model.train()
         total_loss = 0.0
-
-        # 随机打乱数据
-        permutation = np.random.permutation(len(labels))
-        attribute_pairs = attribute_pairs[permutation]
-        structure_pairs = structure_pairs[permutation]
-        labels = labels[permutation]
 
         for i in range(0, len(attribute_pairs), batch_size):
             batch_attr_pairs = attribute_pairs[i:i+batch_size]
             batch_struct_pairs = structure_pairs[i:i+batch_size]
             batch_labels = labels[i:i+batch_size]
 
-            batch_loss = 0.0
+            batch_attr_pairs = torch.tensor(batch_attr_pairs, dtype=torch.float32).to(device)
+            batch_struct_pairs = torch.tensor(batch_struct_pairs, dtype=torch.float32).to(device)
+            batch_labels = torch.tensor(batch_labels, dtype=torch.float32).to(device)
 
-            for (attr_pair, struct_pair, label) in zip(batch_attr_pairs, batch_struct_pairs, batch_labels):
-                emb_k_m = torch.tensor(attr_pair[0], dtype=torch.float32).unsqueeze(0)
-                emb_v_m = torch.tensor(attr_pair[1], dtype=torch.float32).unsqueeze(0)
-                emb_k_s = torch.tensor(struct_pair[0], dtype=torch.float32).unsqueeze(0)
-                emb_v_s = torch.tensor(struct_pair[1], dtype=torch.float32).unsqueeze(0)
+            emb_k_m = batch_attr_pairs[:, 0, :]
+            emb_v_m = batch_attr_pairs[:, 1, :]
+            emb_k_s = batch_struct_pairs[:, 0, :]
+            emb_v_s = batch_struct_pairs[:, 1, :]
 
-                # 将属性嵌入和结构嵌入进行合并（例如，拼接或相加）
-                combined_emb_k = torch.cat((emb_k_m, emb_k_s), dim=-1)
-                combined_emb_v = torch.cat((emb_v_m, emb_v_s), dim=-1)
+            output_k = model(emb_k_m, emb_k_s)
+            output_v = model(emb_v_m, emb_v_s)
 
-                # 使用DistanceBasedLogits生成logits
-                logits = distance_model(combined_emb_k, combined_emb_v).squeeze(-1)
 
-                label_tensor = torch.tensor([label], dtype=torch.float32)
+            logits = torch.cat([output_k, output_v], dim=-1)
 
-                loss = criterion(logits, label_tensor)
-                batch_loss += loss
+            logits = torch.sum(logits, dim=-1)
+
+            loss = criterion(logits, batch_labels)
 
             optimizer.zero_grad()
-            distance_optimizer.zero_grad()
-            total_loss += batch_loss.item()
-            batch_loss.backward()
+            loss.backward()
+
+            # 应用梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+
+            total_loss += loss.item()
             optimizer.step()
-            distance_optimizer.step()
 
-        print(f'Epoch [{epoch}/{num_epochs}], Loss: {total_loss/len(attribute_pairs):.4f}')
+        # 更新学习率调度器
+        scheduler.step(total_loss / len(attribute_pairs))
 
-    final_weights = model.layers[0][2].router.fc.weight.detach().numpy()
+        # 打印每个epoch结束时的专家权重
+        print(f"Epoch [{epoch+1}/{num_epochs}] 结束后的专家权重：")
+        print_expert_weights(model.layers[0][2].router)
+        print(f"训练后的Router权重总和：{torch.sum(model.layers[0][2].router.fc.weight).item()}")
+        # 打印每个epoch的平均损失
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss/len(attribute_pairs):.4f}')
+
+    # 打印最终的全局权重
+    final_weights = model.layers[0][2].router.fc.weight.detach().cpu().numpy()
     print(f"Final global weights shape after training: {final_weights.shape}")
+
 
 
 def compute_mrr(sim_matrix):
@@ -474,7 +486,7 @@ def psearch(emb_m, emb_s, K, reg, seed, trained_model):
 
     test = datasets.get('test', n=2000, seed=seed)
     train = datasets.get('train', n=850, seed=seed)
-
+    print(f"train is {train}")
     traindata = []
     for k, v in train:
         emb_k_m = torch.tensor(emb_m[k], dtype=torch.float32).unsqueeze(0)
@@ -490,7 +502,9 @@ def psearch(emb_m, emb_s, K, reg, seed, trained_model):
 
         traindata.append([emb_k, emb_v])
     traindata = np.array(traindata)
+    print(f"traindata is {traindata}")
     testdata = []
+
     for k, v in test:
         emb_k_m = torch.tensor(emb_m[k], dtype=torch.float32).unsqueeze(0)
         emb_k_s = torch.tensor(emb_s[k], dtype=torch.float32).unsqueeze(0)
@@ -544,14 +558,15 @@ if __name__ == '__main__':
                 attribute_pairs, structure_pairs, labels = pickle.load(f)
             print(f"Data loaded from {generated_targets_save_path}")
         else:
-            attribute_pairs, structure_pairs, labels = generate_target(emb_m, emb_s, anchors, num_negative_samples=1,
+            attribute_pairs, structure_pairs, labels = generate_target(emb_m, emb_s, anchors, num_negative_samples=2800,
                                                                        save_path=generated_targets_save_path)
-
-        model = TransformerWithMoE(input_dim=768, hidden_dim=512, output_dim=768, num_experts=4, num_layers=6)
+        print(attribute_pairs.shape)
+        print(labels)
+        model = TransformerWithMoE(input_dim=768, hidden_dim=512, output_dim=768, num_experts=4, num_layers=8)
         print(f"Model initialized: {type(model)}")
 
         # 训练模型
-        train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=1000, learning_rate=0.001)
+        train_model(attribute_pairs, structure_pairs, labels, model, num_epochs=2, learning_rate=0.001)
 
         # 对模型进行测试和评估
         for model_idx in [0]:
@@ -559,7 +574,7 @@ if __name__ == '__main__':
             model_name = ['MAUIL-a', 'MAUIL-s', 'MAUIL'][model_idx]
             dim = emb.shape[-1]
             for K in [[120], [120], [120]][model_idx]:
-                for reg in [100, 1000]:
+                for reg in [1000]:
                     score = []
                     seed_ = list(range(10))
                     psearch_partial = partial(psearch, emb_m, emb_s, K, reg, trained_model=model)
