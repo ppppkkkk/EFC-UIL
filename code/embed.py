@@ -57,7 +57,7 @@ def load_pretrained_model(model_path='consert_model_initial.pth', device=''):
 
 
 def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, learning_rate=0.0001,
-             in_network_contrastive=True, between_network_contrastive=True, model_path='consert_model_initial_dblp_1.pth', initial_embed_path='initial_embeddings_dblp_1.pkl'):
+             in_network_contrastive=True, between_network_contrastive=True, model_path='consert_model_initial_dblp_1.pth', initial_embed_path='initial_embeddings_dblp_1.pkl', final_embed_path_1='final_embeddings_combined_dblp_1_1.pkl'):
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model_name = 'B:/bert-base-uncased'
@@ -154,24 +154,38 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
                 torch.cuda.empty_cache()
             print(f'Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss / len(docs)}')
 
-    torch.save(contrastive_model.state_dict(), model_path)
-    print(f"Model state saved at: {model_path}")
-    print("Training complete")
+    # torch.save(contrastive_model.state_dict(), model_path)
+    # print(f"Model state saved at: {model_path}")
+    # print("Training complete")
+    #
+    # # contrastive_model.eval()
+    # # with torch.no_grad():
+    # #     initial_embeddings = contrastive_model().cpu().detach().numpy()
+    #
+    # initial_embeddings = pickle.load(open(final_embed_path_1, 'rb'))
+    # print(initial_embeddings.shape)
 
-    # contrastive_model.eval()
-    # with torch.no_grad():
-    #     initial_embeddings = contrastive_model().cpu().detach().numpy()
+    if os.path.exists(final_embed_path_1):
+        # 如果文件存在，直接读取嵌入
+        initial_embeddings = pickle.load(open(final_embed_path_1, 'rb'))
+        print("Embeddings loaded from final_embed_path_1.")
+    else:
+        # 如果文件不存在，生成嵌入并保存
+        contrastive_model.eval()
+        with torch.no_grad():
+            initial_embeddings = contrastive_model().cpu().detach().numpy()
 
-    initial_embeddings = pickle.load(open('final_embeddings_combined_dblp_1_1.pkl', 'rb'))
+        # 保存生成的嵌入到文件
+        with open(final_embed_path_1, 'wb') as f:
+            pickle.dump(initial_embeddings, f)
+        print("final_embed_path_1 generated and saved to file.")
+
     print(initial_embeddings.shape)
     # 网络间对比学习
     if not nx.is_directed(G1):
         G1 = G1.to_directed()
     if not nx.is_directed(G2):
         G2 = G2.to_directed()
-
-    # G1 = nx.relabel_nodes(G1, lambda x: x)
-    # G2 = nx.relabel_nodes(G2, lambda x: x)
 
     initial_embeddings_G1 = initial_embeddings[:len(G1.nodes())]
     initial_embeddings_G2 = initial_embeddings[len(G1.nodes()):]
@@ -216,8 +230,8 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
             neg_embeds1 = torch.tensor(neg_embeds1).float().to(device)
             neg_embeds2 = torch.tensor(neg_embeds2).float().to(device)
 
-            loss = contrastive_loss_network(anchor_embeds1, anchor_embeds2, neg_embeds1, temperature=0.1) + \
-                   contrastive_loss_network(anchor_embeds2, anchor_embeds1, neg_embeds2, temperature=0.1)
+            loss = contrastive_loss_network(anchor_embeds1, anchor_embeds2, neg_embeds1, temperature=0.05) + \
+                   contrastive_loss_network(anchor_embeds2, anchor_embeds1, neg_embeds2, temperature=0.05)
 
             total_loss += loss.item()
 
