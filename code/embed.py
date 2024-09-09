@@ -158,10 +158,12 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
     print(f"Model state saved at: {model_path}")
     print("Training complete")
 
-    contrastive_model.eval()
-    with torch.no_grad():
-        initial_embeddings = contrastive_model().cpu().detach().numpy()
+    # contrastive_model.eval()
+    # with torch.no_grad():
+    #     initial_embeddings = contrastive_model().cpu().detach().numpy()
 
+    initial_embeddings = pickle.load(open('final_embeddings_combined_dblp_1_1.pkl', 'rb'))
+    print(initial_embeddings.shape)
     # 网络间对比学习
     if not nx.is_directed(G1):
         G1 = G1.to_directed()
@@ -179,7 +181,7 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
     if between_network_contrastive:
         for epoch in range(epochs):
             total_loss = 0.0
-
+            print(epoch)
             anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
 
             for anchor_node1, anchor_node2 in anchors.items():
@@ -214,8 +216,8 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
             neg_embeds1 = torch.tensor(neg_embeds1).float().to(device)
             neg_embeds2 = torch.tensor(neg_embeds2).float().to(device)
 
-            loss = contrastive_loss_network(anchor_embeds1, anchor_embeds2, neg_embeds1, temperature=0.05) + \
-                   contrastive_loss_network(anchor_embeds2, anchor_embeds1, neg_embeds2, temperature=0.05)
+            loss = contrastive_loss_network(anchor_embeds1, anchor_embeds2, neg_embeds1, temperature=0.1) + \
+                   contrastive_loss_network(anchor_embeds2, anchor_embeds1, neg_embeds2, temperature=0.1)
 
             total_loss += loss.item()
 
@@ -234,7 +236,7 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
                                                                                                       keepdims=True)
 
     # 保存最终的嵌入
-    pickle.dump(final_embeddings, open('../emb/final_embeddings_combined_dblp_1.pkl', 'wb'))
+    pickle.dump(final_embeddings, open('../emb/final_embeddings_combined_dblp_1_2.pkl', 'wb'))
 
     print(f"Final concatenated embeddings shape: {final_embeddings.shape}")
     return final_embeddings
@@ -254,7 +256,7 @@ def contrastive_loss_network(anchor_embed, positive_embed, negative_embed, tempe
 
 
 def network_embed(G1, G2, anchors, dim=768, method="line", order='all', contrastive=False, epochs=10,
-                  initial_embed_path1='initial_embeddings1_dblp_2.pkl', initial_embed_path2='initial_embeddings2_dblp_2.pkl'):
+                  initial_embed_path1='initial_embeddings1_dblp_1.pkl', initial_embed_path2='initial_embeddings2_dblp_1.pkl'):
     if not nx.is_directed(G1):
         G1 = G1.to_directed()
     if not nx.is_directed(G2):
@@ -363,6 +365,7 @@ def my_embed_bert(docs, dim=768):
     print(numpy_array.shape)
     return numpy_array
 
+
 def embed_dblp():
     print(time.ctime(), '\tLoading data...')
     g1, g2 = pickle.load(open('../data/dblp/networks', 'rb'))
@@ -381,21 +384,21 @@ def embed_dblp():
     for seed in [42]:
         for d in [768]:
             print(time.ctime(), '\tMy level attributes embedding...')
-            emb_m = my_embed(topic, g1, g2, anchors, batch_size=10, temperature=0.1, epochs=20, learning_rate=0.0001,
-                    in_network_contrastive=True, between_network_contrastive=False)
+            emb_m = my_embed(topic, g1, g2, anchors, batch_size=20, temperature=0.1, epochs=20, learning_rate=0.0001,
+                    in_network_contrastive=False, between_network_contrastive=True)
             print(emb_m.shape)
-            print(time.ctime(), '\tNetwork embedding...')
-            emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768,
-                                            method="line", order='all', contrastive=False, epochs=50)
-            emb_g1.update(emb_g2)
-            emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
+            # print(time.ctime(), '\tNetwork embedding...')
+            # emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768,
+            #                                 method="line", order='all', contrastive=False, epochs=50)
+            # emb_g1.update(emb_g2)
+            # emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
+            # #
+            # emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+            # emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True) / np.std(emb_m, axis=0, keepdims=True))
             #
-            emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
-            emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True) / np.std(emb_m, axis=0, keepdims=True))
-
-            # Saving embeddings
-            pickle.dump(emb_s, open('../emb/emb_s_dblp_2_con', 'wb'))
-            pickle.dump((emb_m, emb_s), open('../emb/emb_s_dblp_2_con', 'wb'))
+            # # Saving embeddings
+            # pickle.dump(emb_s, open('../emb/emb_s_dblp_2_con', 'wb'))
+            # pickle.dump((emb_m, emb_s), open('../emb/emb_s_dblp_2_con', 'wb'))
 
 
 
