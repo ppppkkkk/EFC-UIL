@@ -13,7 +13,6 @@ stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
 tf.compat.v1.disable_v2_behavior()
 
 
-# 2-layer bert encoder
 class ContrastiveLearningModel(nn.Module):
     def __init__(self, initial_embeddings):
         super(ContrastiveLearningModel, self).__init__()
@@ -45,7 +44,7 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
     model_name = '../bert-base-uncased'
     torch.backends.cudnn.benchmark = True  # 启用 CuDNN 的自动优化
 
-    model = ConSERT(model_name, device=device, cutoff_rate=0.12, close_dropout=True)
+    model = ConSERT(model_name, device=device)
     model.__setattr__("max_seq_length", 512)
     model.to(device)
     # 检查是否存在初始嵌入文件
@@ -355,6 +354,27 @@ def network_embed(G1, G2, anchors, dim=768, method="line", order='all', batch_si
             print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(anchors)}")
 
     return embeddings1, embeddings2
+
+
+def joint_embed(docs, G1, G2, anchors, batch_size=20, dim=768, temperature=0.1, epochs=20, learning_rate=0.0001,
+             emb_m_in_network_contrastive=True, emb_m_between_network_contrastive=True, emb_s_contrastive=True, initial_embed_emb_m_path='initial_embeddings_dblp_1.pkl', initial_embed_emb_s_path1='initial_embeddings1_dblp_1.pkl', initial_embed_emb_s_path2='initial_embeddings2_dblp_1.pkl'):
+
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    if os.path.exists(initial_embed_emb_m_path):
+        with open(initial_embed_emb_m_path, 'rb') as f:
+            numpy_array_initial = pickle.load(f)
+        print(f"Loaded initial embeddings from {initial_embed_emb_m_path}")
+
+    contrastive_model = ContrastiveLearningModel(numpy_array_initial).to(device)
+
+    optimizer = torch.optim.Adam(contrastive_model.parameters(), lr=learning_rate)
+    scaler = GradScaler()
+
+    print(time.ctime(), '\tStarting contrastive learning training...')
+    contrastive_model.train()
+    dropout_layer = nn.Dropout(p=0.2)
+
+
 
 
 def embed_dblp():
