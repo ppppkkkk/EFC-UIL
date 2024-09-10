@@ -441,8 +441,8 @@ def joint_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20
             batch_neg_embeds1 = torch.tensor(np.array(neg_embeds1)).float().to(device)
             batch_neg_embeds2 = torch.tensor(np.array(neg_embeds2)).float().to(device)
 
-            loss_between_network = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2, temperature=0.05)
-            loss_between_network += contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1, temperature=0.05)
+            loss_between_network = contrastive_loss_network(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2, temperature=0.05)
+            loss_between_network += contrastive_loss_network(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1, temperature=0.05)
             epoch_loss += loss_between_network * 10  # between_network_contrastive 的损失乘以10倍
 
         # 网络嵌入的对比学习 (Network contrastive)
@@ -470,8 +470,8 @@ def joint_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20
                 batch_neg_embeds1 = torch.tensor(np.array(neg_embeds1[batch_start:batch_end])).float().to(device)
                 batch_neg_embeds2 = torch.tensor(np.array(neg_embeds2[batch_start:batch_end])).float().to(device)
 
-                loss = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2, temperature=0.05) + \
-                       contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1, temperature=0.05)
+                loss = contrastive_loss_network(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2, temperature=0.05) + \
+                       contrastive_loss_network(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1, temperature=0.05)
                 total_network_loss += loss * 10  # learning_rate 乘10倍
 
             epoch_loss += total_network_loss
