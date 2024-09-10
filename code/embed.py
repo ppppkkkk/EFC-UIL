@@ -374,6 +374,71 @@ def joint_embed(docs, G1, G2, anchors, batch_size=20, dim=768, temperature=0.1, 
     contrastive_model.train()
     dropout_layer = nn.Dropout(p=0.2)
 
+    for epoch in range(epochs):
+        print(f"Epoch {epoch + 1} starts")
+        epoch_loss = 0.0
+        optimizer.zero_grad()
+
+        if emb_m_in_network_contrastive:
+            for i in range(0, len(docs), batch_size):
+                print(i)
+
+                # 获取当前批次的正样本嵌入
+                pos_embeddings = torch.tensor(numpy_array_initial[i:i + batch_size]).float().to(device)
+                pos_embeddings = dropout_layer(pos_embeddings)
+
+                # 生成负样本嵌入，排除正样本自身
+                negative_indices = []
+                for idx in range(batch_size):
+                    candidates = list(range(0, idx)) + list(range(idx + 1, batch_size))
+                    negative_indices.append(torch.tensor(candidates).to(device))
+
+                neg_embeddings = torch.stack([pos_embeddings[indices] for indices in negative_indices])
+
+                loss_in_network = contrastive_loss(pos_embeddings, neg_embeddings, pos_embeddings, temperature)
+
+                # 累积损失
+                epoch_loss += loss_in_network
+
+        if emb_m_between_network_contrastive:
+            anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
+
+            # 遍历锚点并生成嵌入和负样本
+            for anchor_node1, anchor_node2 in anchors.items():
+                anchor_embeds1.append(numpy_array_initial[anchor_node1])
+                anchor_embeds2.append(numpy_array_initial[anchor_node2])
+
+                # 选择 anchor_node1 的邻居作为负样本
+                neighbors1 = list(G1.neighbors(anchor_node1))
+                neg_embeds1.extend([numpy_array_initial[neighbor] for neighbor in neighbors1])
+
+                # 选择 anchor_node2 的邻居作为负样本
+                neighbors2 = list(G2.neighbors(anchor_node2))
+                neg_embeds2.extend([numpy_array_initial[neighbor] for neighbor in neighbors2])
+
+            # 计算 between-network 对比损失
+            batch_anchor_embeds1 = torch.tensor(np.array(anchor_embeds1)).float().to(device)
+            batch_anchor_embeds2 = torch.tensor(np.array(anchor_embeds2)).float().to(device)
+            batch_neg_embeds1 = torch.tensor(np.array(neg_embeds1)).float().to(device)
+            batch_neg_embeds2 = torch.tensor(np.array(neg_embeds2)).float().to(device)
+
+            loss_between_network = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2, temperature=0.05)
+            loss_between_network += contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1, temperature=0.05)
+
+            # 累积损失
+            epoch_loss += loss_between_network * 10  # between_network_contrastive 的损失乘以10倍
+
+        # 反向传播和优化
+        scaler.scale(epoch_loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+
+        print(f'Epoch {epoch + 1}/{epochs}, Combined Loss: {epoch_loss.item()}')
+
+    # 保存最终嵌入
+    final_embeddings = numpy_array_initial
+    return final_embeddings
 
 
 
