@@ -224,11 +224,11 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
                                         torch.tensor(initial_embeddings_G2[node_to_idx_G2[anchor_node2]]).float()))
                     neg_embeds2.append(initial_embeddings_G2[node_to_idx_G2[neg_node2]])
 
-            # 将嵌入转换为 torch tensor 并在批处理上计算损失
-            anchor_embeds1 = torch.tensor(anchor_embeds1).float().to(device)
-            anchor_embeds2 = torch.tensor(anchor_embeds2).float().to(device)
-            neg_embeds1 = torch.tensor(neg_embeds1).float().to(device)
-            neg_embeds2 = torch.tensor(neg_embeds2).float().to(device)
+            # 将列表转换为 numpy.ndarray，然后转换为 torch.tensor
+            anchor_embeds1 = torch.tensor(np.array(anchor_embeds1)).float().to(device)
+            anchor_embeds2 = torch.tensor(np.array(anchor_embeds2)).float().to(device)
+            neg_embeds1 = torch.tensor(np.array(neg_embeds1)).float().to(device)
+            neg_embeds2 = torch.tensor(np.array(neg_embeds2)).float().to(device)
 
             loss = contrastive_loss_network(anchor_embeds1, anchor_embeds2, neg_embeds1, temperature=0.05) + \
                    contrastive_loss_network(anchor_embeds2, anchor_embeds1, neg_embeds2, temperature=0.05)
