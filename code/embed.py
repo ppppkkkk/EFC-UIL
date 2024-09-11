@@ -1,3 +1,4 @@
+
 import json
 import tensorflow as tf
 from ge import LINE
@@ -37,8 +38,8 @@ def batch_tokenize(model, docs, device):
     return tokenized
 
 
-def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, learning_rate=0.0001,
-             in_network_contrastive=True, between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_1.pkl', final_embed_path_1='final_embeddings_combined_dblp_1_1.pkl'):
+def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, learning_rate=0.001,
+             in_network_contrastive=True, between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_2.pkl', final_embed_path_1='final_embeddings_combined_dblp_2_1.pkl'):
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model_name = '../bert-base-uncased'
@@ -88,41 +89,26 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
             optimizer.zero_grad()
 
             for i in range(0, len(docs), batch_size):
-                print(i)
-                batch_docs = docs[i:i + batch_size]
-                tokenized = batch_tokenize(model, batch_docs, device)
+                end_index = min(i + batch_size, len(docs))
 
-                # 生成负样本嵌入（从batch中任意取）
-                negative_indices = torch.randperm(len(tokenized))  # 随机打乱顺序作为负样本
-                neg_docs = [batch_docs[idx] for idx in negative_indices]
-
-                # 对原始句子进行数据增强并作为正样本
-                positive_features = tokenized
-
-                # 限制每个特征的长度
-                for features in positive_features:
-                    for key, value in features.items():
-                        features[key] = value[:, :512]
-
-                with autocast():
-                    # 生成正样本嵌入
-                    pos_out_features = [model.forward(features) for features in positive_features]
-                    pos_embeddings = torch.cat([out['sentence_embedding'] for out in pos_out_features]).to(device)
-                    pos_embeddings = dropout_layer(pos_embeddings)
-                    # 生成负样本嵌入
-                    neg_tokenized = batch_tokenize(model, neg_docs, device)
-                    neg_out_features = [model.forward(features) for features in neg_tokenized]
-                    neg_embeddings = torch.cat([out['sentence_embedding'] for out in neg_out_features]).to(device)
-                    neg_embeddings = dropout_layer(neg_embeddings)
-                    # 获取当前嵌入
+                with torch.no_grad():
                     current_embeddings = contrastive_model()
+                original_embeddings = current_embeddings[i:end_index]
+                pos_embeddings = dropout_layer(original_embeddings)
+                neg_embeddings_list = []
+                for idx in range(original_embeddings.size(0)):
+                    neg_embeddings = torch.cat([original_embeddings[:idx], original_embeddings[idx + 1:]], dim=0)
+                    neg_embeddings = dropout_layer(neg_embeddings)
+                    neg_embeddings_list.append(neg_embeddings)
 
-                    # 计算对比学习损失
-                    loss = contrastive_loss(pos_embeddings, neg_embeddings, current_embeddings[i:i + batch_size],
-                                            temperature)
+                # 将负样本转化为批次处理的形式
+                neg_embeddings = torch.stack(neg_embeddings_list)
 
-                    epoch_loss += loss.item()
+                # 计算对比学习损失
+                loss = contrastive_loss(pos_embeddings, neg_embeddings, current_embeddings[i:end_index], temperature)
+                epoch_loss += loss.item()
 
+                # 反向传播
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
@@ -130,9 +116,12 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
 
                 torch.cuda.synchronize()
 
-                del pos_embeddings, neg_embeddings
+                # 清除缓存
+                del pos_embeddings, neg_embeddings, original_embeddings
                 torch.cuda.empty_cache()
-            print(f'Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss / len(docs)}')
+
+            print(f'Epoch {epoch + 1}/{epochs}, Average Loss: {epoch_loss / len(docs)}')
+
 
     if os.path.exists(final_embed_path_1):
         # 如果文件存在，直接读取嵌入
@@ -241,7 +230,7 @@ def contrastive_loss_network(anchor_embed, positive_embed, negative_embed, tempe
 
 
 def network_embed(G1, G2, anchors, dim=768, method="line", order='all', batch_size=20, contrastive=False, epochs=10,
-                  initial_embed_path1='initial_embeddings1_dblp_1.pkl', initial_embed_path2='initial_embeddings2_dblp_1.pkl'):
+                  initial_embed_path1='initial_embeddings1_dblp_2.pkl', initial_embed_path2='initial_embeddings2_dblp_2.pkl'):
     if not nx.is_directed(G1):
         G1 = G1.to_directed()
     if not nx.is_directed(G2):
@@ -356,11 +345,18 @@ def network_embed(G1, G2, anchors, dim=768, method="line", order='all', batch_si
     return embeddings1, embeddings2
 
 
-def joint_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, learning_rate=0.0001,
+def joint_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, learning_rate=0.01,
                 emb_m_in_network_contrastive=True, emb_m_between_network_contrastive=True, emb_s_contrastive=True,
                 initial_embed_emb_m_path='initial_embeddings_dblp_1.pkl', initial_embed_emb_s_path1='initial_embeddings1_dblp_1.pkl',
                 initial_embed_emb_s_path2='initial_embeddings2_dblp_1.pkl'):
 
+    if not nx.is_directed(G1):
+        G1 = G1.to_directed()
+    if not nx.is_directed(G2):
+        G2 = G2.to_directed()
+
+    node_to_idx_G1 = {node: idx for idx, node in enumerate(G1.nodes())}
+    node_to_idx_G2 = {node: idx for idx, node in enumerate(G2.nodes())}
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # 加载文档嵌入
@@ -376,24 +372,25 @@ def joint_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20
             embeddings2 = pickle.load(f2)
         print(f"Loaded initial embeddings from {initial_embed_emb_s_path1} and {initial_embed_emb_s_path2}")
 
-    # 将嵌入转换为 torch.Tensor 并设置 requires_grad=True
-    numpy_array_initial = torch.tensor(numpy_array_initial, requires_grad=True, device=device)
-    embeddings1 = torch.tensor(embeddings1, requires_grad=True, device=device)
-    embeddings2 = torch.tensor(embeddings2, requires_grad=True, device=device)
+    embeddings1_array = np.array([v for v in embeddings1.values()])
+    embeddings2_array = np.array([v for v in embeddings2.values()])
 
     contrastive_model = ContrastiveLearningModel(numpy_array_initial).to(device)
-
+    contrastive_embeddings1 = ContrastiveLearningModel(embeddings1_array).to(device)
+    contrastive_embeddings2 = ContrastiveLearningModel(embeddings2_array).to(device)
     # 创建一个优化器，包含文档嵌入和网络嵌入
-    optimizer = torch.optim.Adam([
-        {'params': contrastive_model.parameters(), 'lr': learning_rate},  # 文档嵌入模型
-        {'params': [embeddings1, embeddings2], 'lr': learning_rate}  # 网络嵌入
-    ])
+    optimizer = torch.optim.Adam(
+        list(contrastive_model.parameters()) +
+        list(contrastive_embeddings1.parameters()) +
+        list(contrastive_embeddings2.parameters()), lr=learning_rate
+    )
     scaler = GradScaler()
 
     print(time.ctime(), '\tStarting contrastive learning training...')
     contrastive_model.train()
+    contrastive_embeddings1.train()
+    contrastive_embeddings2.train()
     dropout_layer = nn.Dropout(p=0.2)
-
     for epoch in range(epochs):
         print(f"Epoch {epoch + 1} starts")
         epoch_loss = 0.0
@@ -401,79 +398,117 @@ def joint_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20
 
         # 文档嵌入的对比学习 (In-network)
         if emb_m_in_network_contrastive:
+            total_loss_in_network = 0.0
             for i in range(0, len(docs), batch_size):
-                print(i)
+                end_index = min(i + batch_size, len(docs))
 
-                # 获取当前批次的正样本嵌入
-                pos_embeddings = torch.tensor(numpy_array_initial[i:i + batch_size]).float().to(device)
-                pos_embeddings = dropout_layer(pos_embeddings)
+                with torch.no_grad():
+                    current_embeddings = contrastive_model()
+                original_embeddings = current_embeddings[i:end_index]
+                pos_embeddings = dropout_layer(original_embeddings)
+                neg_embeddings_list = []
+                for idx in range(original_embeddings.size(0)):
+                    neg_embeddings = torch.cat([original_embeddings[:idx], original_embeddings[idx + 1:]], dim=0)
+                    neg_embeddings = dropout_layer(neg_embeddings)
+                    neg_embeddings_list.append(neg_embeddings)
 
-                # 生成负样本嵌入，排除正样本自身
-                negative_indices = []
-                for idx in range(batch_size):
-                    candidates = list(range(0, idx)) + list(range(idx + 1, batch_size))
-                    negative_indices.append(torch.tensor(candidates).to(device))
+                # 将负样本转化为批次处理的形式
+                neg_embeddings = torch.stack(neg_embeddings_list)
 
-                neg_embeddings = torch.stack([pos_embeddings[indices] for indices in negative_indices])
+                # 计算对比学习损失
+                loss_in_network = contrastive_loss(pos_embeddings, neg_embeddings, current_embeddings[i:end_index], temperature)
+                total_loss_in_network += loss_in_network.item()
 
-                loss_in_network = contrastive_loss(pos_embeddings, neg_embeddings, pos_embeddings, temperature)
-                epoch_loss += loss_in_network
-
+            # total_loss_in_network /= len(docs)
+            epoch_loss += total_loss_in_network
         # 文档嵌入的跨网络对比学习 (Between-network)
         if emb_m_between_network_contrastive:
+            total_loss_between_network = 0.0
+            print(f"Epoch {epoch + 1}/{epochs}")
+
             anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
+
+            # 获取模型的所有嵌入
+            all_embeddings = contrastive_model()  # 从模型获取所有嵌入
+            initial_embeddings_G1 = all_embeddings[:len(G1.nodes())]
+            initial_embeddings_G2 = all_embeddings[len(G1.nodes()):]
 
             # 遍历锚点并生成嵌入和负样本
             for anchor_node1, anchor_node2 in anchors.items():
-                anchor_embeds1.append(numpy_array_initial[anchor_node1])
-                anchor_embeds2.append(numpy_array_initial[anchor_node2])
+                # 使用对应的索引从嵌入矩阵中提取嵌入
+                anchor_embeds1.append(initial_embeddings_G1[node_to_idx_G1[anchor_node1]])
+                anchor_embeds2.append(initial_embeddings_G2[node_to_idx_G2[anchor_node2]])
 
-                # 选择 anchor_node1 的邻居作为负样本
-                neighbors1 = list(G1.neighbors(anchor_node1))
-                neg_embeds1.extend([numpy_array_initial[neighbor] for neighbor in neighbors1])
-
-                # 选择 anchor_node2 的邻居作为负样本
                 neighbors2 = list(G2.neighbors(anchor_node2))
-                neg_embeds2.extend([numpy_array_initial[neighbor] for neighbor in neighbors2])
+                neg_embeds1.extend([initial_embeddings_G2[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
 
-            batch_anchor_embeds1 = torch.tensor(np.array(anchor_embeds1)).float().to(device)
-            batch_anchor_embeds2 = torch.tensor(np.array(anchor_embeds2)).float().to(device)
-            batch_neg_embeds1 = torch.tensor(np.array(neg_embeds1)).float().to(device)
-            batch_neg_embeds2 = torch.tensor(np.array(neg_embeds2)).float().to(device)
+                neighbors1 = list(G1.neighbors(anchor_node1))
+                neg_embeds2.extend([initial_embeddings_G1[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
 
-            loss_between_network = contrastive_loss_network(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2, temperature=0.05)
-            loss_between_network += contrastive_loss_network(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1, temperature=0.05)
-            epoch_loss += loss_between_network * 10  # between_network_contrastive 的损失乘以10倍
+            # 分批处理锚点和负样本
+            num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
+
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
+
+                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
+                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
+
+                # 计算损失
+                loss_between_network = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
+                                                        temperature=0.05) + \
+                                       contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
+                                                        temperature=0.05)
+
+                total_loss_between_network += loss_between_network.item()
+
+            # 将跨网络损失添加到总损失中
+            # total_loss_between_network /= len(anchors)
+            epoch_loss += total_loss_between_network
 
         # 网络嵌入的对比学习 (Network contrastive)
         if emb_s_contrastive:
             total_network_loss = 0.0
             anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
 
+            # 获取通过模型管理的嵌入
+            updated_embeddings1 = contrastive_embeddings1()  # 从 contrastive_embeddings1 模型获取当前的 embeddings1
+            updated_embeddings2 = contrastive_embeddings2()  # 从 contrastive_embeddings2 模型获取当前的 embeddings2
+
+            # 遍历锚点并生成嵌入和负样本
             for anchor_node1, anchor_node2 in anchors.items():
-                anchor_embeds1.append(embeddings1[anchor_node1])
-                anchor_embeds2.append(embeddings2[anchor_node2])
+                anchor_embeds1.append(updated_embeddings1[node_to_idx_G1[anchor_node1]])
+                anchor_embeds2.append(updated_embeddings2[node_to_idx_G2[anchor_node2]])
 
                 neighbors2 = list(G2.neighbors(anchor_node2))
-                neg_embeds1.extend([embeddings2[neighbor] for neighbor in neighbors2])
+                neg_embeds1.extend([updated_embeddings2[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
 
                 neighbors1 = list(G1.neighbors(anchor_node1))
-                neg_embeds2.extend([embeddings1[neighbor] for neighbor in neighbors1])
+                neg_embeds2.extend([updated_embeddings1[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
 
+            # 分批处理锚点和负样本
             num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
+
             for batch_idx in range(num_batches):
                 batch_start = batch_idx * batch_size
                 batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
 
-                batch_anchor_embeds1 = torch.tensor(np.array(anchor_embeds1[batch_start:batch_end])).float().to(device)
-                batch_anchor_embeds2 = torch.tensor(np.array(anchor_embeds2[batch_start:batch_end])).float().to(device)
-                batch_neg_embeds1 = torch.tensor(np.array(neg_embeds1[batch_start:batch_end])).float().to(device)
-                batch_neg_embeds2 = torch.tensor(np.array(neg_embeds2[batch_start:batch_end])).float().to(device)
+                # 使用 torch.stack 将嵌入转为 PyTorch 张量
+                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
+                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
 
-                loss = contrastive_loss_network(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2, temperature=0.05) + \
-                       contrastive_loss_network(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1, temperature=0.05)
-                total_network_loss += loss * 10  # learning_rate 乘10倍
-
+                # 计算对比损失
+                loss = contrastive_loss_network(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
+                                                temperature=0.05) + \
+                       contrastive_loss_network(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
+                                                temperature=0.05)
+                total_network_loss += loss
+            # total_network_loss/= len(anchors)
             epoch_loss += total_network_loss
 
         # 反向传播和优化
@@ -482,16 +517,9 @@ def joint_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20
         scaler.update()
         optimizer.zero_grad()
 
-        print(f'Epoch {epoch + 1}/{epochs}, Combined Loss: {epoch_loss.item()}')
+        print(f'Epoch {epoch + 1}/{epochs}, Combined Loss: {epoch_loss.item()/len(docs)}')
 
-    # 保存最终嵌入
-    with open(initial_embed_emb_m_path, 'wb') as f:
-        pickle.dump(numpy_array_initial.detach().cpu().numpy(), f)
-    with open(initial_embed_emb_s_path1, 'wb') as f1, open(initial_embed_emb_s_path2, 'wb') as f2:
-        pickle.dump(embeddings1.detach().cpu().numpy(), f1)
-        pickle.dump(embeddings2.detach().cpu().numpy(), f2)
-
-    return numpy_array_initial, embeddings1, embeddings2
+    return contrastive_model().detach().cpu().numpy(), contrastive_embeddings1().detach().cpu().numpy(), contrastive_embeddings2().detach().cpu().numpy()
 
 
 
@@ -512,22 +540,28 @@ def embed_dblp():
     print(topic)
     for seed in [42]:
         for d in [768]:
-            print(time.ctime(), '\tMy level attributes embedding...')
-            # emb_m = my_embed(topic, g1, g2, anchors, batch_size=10, temperature=0.1, epochs=20, learning_rate=0.0001,
-            #         in_network_contrastive=False, between_network_contrastive=True)
-            # print(emb_m.shape)
+            print(time.ctime(), '\tJoint attributes embedding...')
+            emb_m = my_embed(topic, g1, g2, anchors, batch_size=10, temperature=0.1, epochs=20, learning_rate=0.001,
+                    in_network_contrastive=True, between_network_contrastive=True)
+            print(emb_m.shape)
             # print(time.ctime(), '\tNetwork embedding...')
-            emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768,
-                                            method="line", order='all', contrastive=True, epochs=50)
-            emb_g1.update(emb_g2)
-            emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
+            # emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768,
+            #                                 method="line", order='all', contrastive=False, epochs=50)
+
+            # emb_m, emb_g1, emb_g2 = joint_embed(topic, g1, g2, anchors, batch_size=20, temperature=0.1, epochs=0, learning_rate=0.01,
+            #                                     emb_m_in_network_contrastive=False, emb_m_between_network_contrastive=False,
+            #                                     emb_s_contrastive=False,
+            #                                     initial_embed_emb_m_path='initial_embeddings_dblp_1.pkl',
+            #                                     initial_embed_emb_s_path1='initial_embeddings1_dblp_1.pkl',
+            #                                     initial_embed_emb_s_path2='initial_embeddings2_dblp_1.pkl')
+            # emb_s = np.vstack([emb_g1, emb_g2])
             #
-            emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
-            # emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True) / np.std(emb_m, axis=0, keepdims=True))
-            #
-            # # Saving embeddings
-            pickle.dump(emb_s, open('../emb/emb_s_dblp_1_con_new_jiabian', 'wb'))
-            # pickle.dump((emb_m, emb_s), open('../emb/emb_s_dblp_2_con', 'wb'))
+            # emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
+            # emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+
+            # # # Saving embeddings
+            # # pickle.dump(emb_s, open('../emb/emb_s_dblp_1_con_new_jiabian', 'wb'))
+            # pickle.dump((emb_m, emb_s), open('../emb/emb_dblp_1_joint_initial', 'wb'))
 
 
 
