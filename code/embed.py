@@ -38,8 +38,8 @@ def batch_tokenize(model, docs, device):
     return tokenized
 
 
-def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, learning_rate=0.001,
-             in_network_contrastive=True, between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_2.pkl', final_embed_path_1='final_embeddings_combined_dblp_2_1.pkl'):
+def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
+             in_network_contrastive=True, between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_1.pkl', final_embed_path_1='final_embeddings_combined_dblp_1_1.pkl'):
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model_name = '../bert-base-uncased'
@@ -73,7 +73,9 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
         with open(initial_embed_path, 'wb') as f:
             pickle.dump(numpy_array_initial, f)
         print(f"Initial embeddings saved to {initial_embed_path}")
-
+    numpy_array_initial = (numpy_array_initial - np.mean(numpy_array_initial, axis=0, keepdims=True)) / np.std(numpy_array_initial,
+                                                                                                      axis=0,
+                                                                                                      keepdims=True)
     contrastive_model = ContrastiveLearningModel(numpy_array_initial).to(device)
 
     optimizer = torch.optim.Adam(contrastive_model.parameters(), lr=learning_rate)
@@ -138,6 +140,9 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
             pickle.dump(initial_embeddings, f)
         print("final_embed_path_1 generated and saved to file.")
 
+    initial_embeddings = (initial_embeddings - np.mean(initial_embeddings, axis=0, keepdims=True)) / np.std(initial_embeddings,
+                                                                                                      axis=0,
+                                                                                                      keepdims=True)
     print(initial_embeddings.shape)
     # 网络间对比学习
     if not nx.is_directed(G1):
@@ -205,9 +210,9 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.1, epochs=20, l
     print("between_network_contrastive finish")
 
     final_embeddings = np.concatenate([initial_embeddings_G1, initial_embeddings_G2], axis=0)
-    final_embeddings = (final_embeddings - np.mean(final_embeddings, axis=0, keepdims=True)) / np.std(final_embeddings,
-                                                                                                      axis=0,
-                                                                                                      keepdims=True)
+    # final_embeddings = (final_embeddings - np.mean(final_embeddings, axis=0, keepdims=True)) / np.std(final_embeddings,
+    #                                                                                                   axis=0,
+    #                                                                                                   keepdims=True)
 
     # 保存最终的嵌入
     pickle.dump(final_embeddings, open('../emb/final_embeddings_combined_dblp_1_2.pkl', 'wb'))
@@ -541,7 +546,7 @@ def embed_dblp():
     for seed in [42]:
         for d in [768]:
             print(time.ctime(), '\tJoint attributes embedding...')
-            emb_m = my_embed(topic, g1, g2, anchors, batch_size=10, temperature=0.1, epochs=20, learning_rate=0.001,
+            emb_m = my_embed(topic, g1, g2, anchors, batch_size=10, temperature=0.1, epochs=20, learning_rate=0.0001,
                     in_network_contrastive=True, between_network_contrastive=True)
             print(emb_m.shape)
             # print(time.ctime(), '\tNetwork embedding...')
