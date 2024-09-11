@@ -67,8 +67,8 @@ if __name__ == '__main__':
 
     for seed in [41]:
         d = 768
-        emb_m = pickle.load(open('../emb/final_embeddings_combined_dblp_1_1.pkl', 'rb'))
-        # emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
+        emb_m = pickle.load(open('../emb/final_embeddings_combined_dblp_1_2.pkl', 'rb'))
+        emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
         print(f"emb_m shape: {emb_m.shape}")
         # print(f"emb_s shape: {emb_s.shape}")
         # emb_all = np.concatenate((emb_m, emb_s), axis=-1)

@@ -109,7 +109,6 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, 
                 # 计算对比学习损失
                 loss = contrastive_loss(pos_embeddings, neg_embeddings, current_embeddings[i:end_index], temperature)
                 epoch_loss += loss.item()
-
                 # 反向传播
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -122,7 +121,7 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, 
                 del pos_embeddings, neg_embeddings, original_embeddings
                 torch.cuda.empty_cache()
 
-            print(f'Epoch {epoch + 1}/{epochs}, Average Loss: {epoch_loss / len(docs)}')
+            print(f'Epoch {epoch + 1}/{epochs}, Average Loss: {epoch_loss/len(docs)}')
 
 
     if os.path.exists(final_embed_path_1):
@@ -202,8 +201,8 @@ def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, 
                 # 批量处理后更新嵌入
                 with torch.no_grad():
                     for i, anchor_node1 in enumerate(list(anchors.keys())[batch_start:batch_end]):
-                        initial_embeddings_G1[node_to_idx_G1[anchor_node1]] -= loss.item() * 0.001
-                        initial_embeddings_G2[node_to_idx_G2[anchors[anchor_node1]]] -= loss.item() * 0.001
+                        initial_embeddings_G1[node_to_idx_G1[anchor_node1]] -= loss.item() * 0.01
+                        initial_embeddings_G2[node_to_idx_G2[anchors[anchor_node1]]] -= loss.item() * 0.01
 
             print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(anchors)}")
 
@@ -547,7 +546,9 @@ def embed_dblp():
         for d in [768]:
             print(time.ctime(), '\tJoint attributes embedding...')
             emb_m = my_embed(topic, g1, g2, anchors, batch_size=10, temperature=0.1, epochs=20, learning_rate=0.0001,
-                    in_network_contrastive=True, between_network_contrastive=True)
+                             in_network_contrastive=True, between_network_contrastive=True,
+                             initial_embed_path='initial_embeddings_dblp_1.pkl',
+                             final_embed_path_1='final_embeddings_combined_dblp_1_1.pkl')
             print(emb_m.shape)
             # print(time.ctime(), '\tNetwork embedding...')
             # emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768,
