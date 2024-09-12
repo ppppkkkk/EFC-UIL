@@ -11,6 +11,8 @@ import pickle, os
 import torch.nn as nn
 import copy
 import random
+from gensim.models import Word2Vec
+
 stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
 tf.compat.v1.disable_v2_behavior()
 
@@ -37,6 +39,48 @@ def batch_tokenize(model, docs, device):
     tokenized = [model.tokenize([doc]) for doc in docs]
     tokenized = [{key: value.to(device) for key, value in doc.items()} for doc in tokenized]
     return tokenized
+
+
+def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
+                   initial_embed_path='.pkl'):
+    # 先检查是否存在已经保存的嵌入
+    if os.path.exists(initial_embed_path):
+        with open(initial_embed_path, 'rb') as f:
+            embeddings = pickle.load(f)
+        print(f"Loaded word2vec embeddings from {initial_embed_path}")
+        return embeddings
+
+    # 分词
+    tokenized_docs = [doc.split() for doc in docs]
+
+    # 训练 Word2Vec 模型
+    print("Training Word2Vec model...")
+    word2vec_model = Word2Vec(sentences=tokenized_docs, vector_size=embed_size, window=window, min_count=min_count,
+                              workers=workers)
+
+    # 为每个文档生成嵌入
+    print("Generating document embeddings...")
+    embeddings = []
+    for doc in tokenized_docs:
+        # 过滤掉不在词汇表中的单词
+        valid_words = [word for word in doc if word in word2vec_model.wv]
+
+        if len(valid_words) > 0:
+            # 计算文档中每个单词的嵌入向量的平均值作为文档的嵌入
+            doc_embedding = np.mean([word2vec_model.wv[word] for word in valid_words], axis=0)
+            embeddings.append(doc_embedding)
+        else:
+            # 如果文档为空或没有有效的词汇，使用零向量填充
+            embeddings.append(np.zeros(embed_size))
+
+    embeddings = np.array(embeddings)
+
+    # 保存嵌入到文件
+    with open(initial_embed_path, 'wb') as f:
+        pickle.dump(embeddings, f)
+    print(f"Word2Vec embeddings saved to {initial_embed_path}")
+
+    return embeddings
 
 
 def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
@@ -359,8 +403,6 @@ def joint_embed(G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, lea
     node_to_idx_G2 = {node: idx for idx, node in enumerate(G2.nodes())}
 
     for epoch in range(epochs):
-        print(f"Epoch {epoch + 1}/{epochs}")
-
         combined_loss = None
 
         optimizer1.zero_grad()
@@ -467,21 +509,20 @@ def embed_dblp():
     print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
     attrs = pickle.load(open('../data/dblp/attrs', 'rb'))
     anchors = dict(json.load(open('../data/dblp/anchors.txt', 'r')))
-    print(anchors)
     print(time.ctime(), '\t # of Anchors:', len(anchors))
     topic = []
-    print(len(attrs))
-    print(attrs[0])
     for i in range(len(attrs)):
         v = attrs[i]
         topic.append(v[2])
-    print(topic)
+    print(len(topic))
     for seed in [42]:
         for d in [768]:
+            # emb_m = word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_dblp_1.pkl')
             # emb_m = my_embed(topic, g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
             #                 between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_1.pkl')
-            # # print(emb_m.shape)
-            # pickle.dump(emb_m, open('../emb/emb_m', 'wb'))
+
+            #emb_m = pickle.load(open('../emb/word2vec_embeddings_dblp_1.pkl', 'rb'))
+            # print(emb_m.shape)
             # print(time.ctime(), '\tNetwork embedding...')
             # emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768, batch_size=20,
             #                                 contrastive=True, epochs=50, learning_rate=0.001,
@@ -489,21 +530,18 @@ def embed_dblp():
             # emb_g1.update(emb_g2)
             # emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
 
-            emb_m, emb_g1, emb_g2 = joint_embed(g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.01,
-                                                emb_m_contrastive=True,
+            emb_m, emb_g1, emb_g2 = joint_embed(g1, g2, anchors, batch_size=20, temperature=0.05, epochs=0, learning_rate=0.01,
+                                                emb_m_contrastive=False,
                                                 emb_s_contrastive=False,
-                                                initial_embed_emb_m_path='initial_embeddings_dblp_1.pkl',
+                                                initial_embed_emb_m_path='word2vec_embeddings_dblp_1.pkl',
                                                 initial_embed_emb_s_path1='initial_embeddings1_dblp_1.pkl',
                                                 initial_embed_emb_s_path2='initial_embeddings2_dblp_1.pkl')
             #
-            emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
-            emb_s = np.vstack([emb_g1, emb_g2])
-            print(emb_s.shape)
-            emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
-            # #
-            # # # # # Saving embeddings
-            # # pickle.dump(emb_s, open('../emb/emb_s', 'wb'))
-            pickle.dump((emb_m, emb_s), open('../emb/emb_dblp_1_joint_initial', 'wb'))
+            # emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
+            # emb_s = np.vstack([emb_g1, emb_g2])
+            # emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+            #
+            # pickle.dump((emb_m, emb_s), open('../emb/emb_dblp_1_joint_initial', 'wb'))
 
 
 

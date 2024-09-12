@@ -67,16 +67,15 @@ if __name__ == '__main__':
 
     for seed in [41]:
         d = 768
-        emb_m = pickle.load(open('../emb/final_embeddings_combined_dblp_1_2.pkl', 'rb'))
+        emb_m, emb_s = pickle.load(open('../emb/emb_dblp_1_joint_initial', 'rb'))
+        emb_m = pickle.load(open('word2vec_embeddings_dblp_1.pkl', 'rb'))
         emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
-        print(f"emb_m shape: {emb_m.shape}")
-        # print(f"emb_s shape: {emb_s.shape}")
-        # emb_all = np.concatenate((emb_m, emb_s), axis=-1)
+        emb_all = np.concatenate((emb_m, emb_s), axis=-1)
         # print(f"emb_all shape: {emb_all.shape}")
 
-        for model_idx in [0]:
-            emb = [emb_m][model_idx]
-            model_name = ['MAUIL-a', 'MAUIL-s', 'MAUIL'][model_idx]
+        for model_idx in [0, 1, 2]:
+            emb = [emb_m, emb_s, emb_all][model_idx]
+            model_name = ['EFC-UIL-a', 'EFC-UIL-s', 'EFC-UIL'][model_idx]
             dim = emb.shape[-1]
             for K in [[120], [120], [120]][model_idx]:
                 for reg in [100, 1000]:
