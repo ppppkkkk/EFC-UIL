@@ -1,16 +1,20 @@
-import json
 import tensorflow as tf
 from ge import LINE
 import torch
 from sentence_transformers.ConSERT import ConSERT
-from torch.cuda.amp import autocast, GradScaler
-import time
-import numpy as np
+from torch.cuda.amp import autocast
 import networkx as nx
-import pickle, os
+import os
 import torch.nn as nn
 import copy
 import random
+import time
+import pickle
+import json
+import numpy as np
+import jieba
+import zhconv
+import re
 from gensim.models import Word2Vec
 
 stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
@@ -84,9 +88,12 @@ def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
 
 
 def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
-             between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_1.pkl'):
+             between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_1.pkl', type='eng'):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model_name = '../bert-base-uncased'
+    if type == 'eng':
+        model_name = '../bert-base-uncased'
+    else:
+        model_name = '../chinese_wwm_ext'
     torch.backends.cudnn.benchmark = True  # 启用 CuDNN 的自动优化
 
     model = ConSERT(model_name, device=device)
@@ -513,46 +520,116 @@ def embed_dblp():
     topic = []
     for i in range(len(attrs)):
         v = attrs[i]
-        topic.append(v[2])
+        #dblp_1是v[2]
+        #dblp_2是v[1]
+        topic.append(v[1])
     print(len(topic))
     for seed in [42]:
         for d in [768]:
-            # emb_m = word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_dblp_1.pkl')
+            # emb_m = word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_dblp_2.pkl')
             # emb_m = my_embed(topic, g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
-            #                 between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_1.pkl')
+            #                 between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_2.pkl')
 
             #emb_m = pickle.load(open('../emb/word2vec_embeddings_dblp_1.pkl', 'rb'))
             # print(emb_m.shape)
             # print(time.ctime(), '\tNetwork embedding...')
             # emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768, batch_size=20,
             #                                 contrastive=True, epochs=50, learning_rate=0.001,
-            #                                 initial_embed_path1='initial_embeddings1_dblp_1.pkl', initial_embed_path2='initial_embeddings2_dblp_1.pkl')
+            #                                 initial_embed_path1='initial_embeddings1_dblp_2.pkl', initial_embed_path2='initial_embeddings2_dblp_2.pkl')
             # emb_g1.update(emb_g2)
             # emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
 
-            emb_m, emb_g1, emb_g2 = joint_embed(g1, g2, anchors, batch_size=20, temperature=0.05, epochs=0, learning_rate=0.01,
+            emb_m, emb_g1, emb_g2 = joint_embed(g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.01,
                                                 emb_m_contrastive=False,
-                                                emb_s_contrastive=False,
-                                                initial_embed_emb_m_path='word2vec_embeddings_dblp_1.pkl',
-                                                initial_embed_emb_s_path1='initial_embeddings1_dblp_1.pkl',
-                                                initial_embed_emb_s_path2='initial_embeddings2_dblp_1.pkl')
+                                                emb_s_contrastive=True,
+                                                initial_embed_emb_m_path='word2vec_embeddings_dblp_2.pkl',
+                                                initial_embed_emb_s_path1='initial_embeddings1_dblp_2.pkl',
+                                                initial_embed_emb_s_path2='initial_embeddings2_dblp_2.pkl')
             #
+            emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
+            emb_s = np.vstack([emb_g1, emb_g2])
+            emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+
+            pickle.dump((emb_m, emb_s), open('../emb/emb_dblp_1_joint_initial', 'wb'))
+
+
+def embed_wd():
+    non_chinese_pattern = re.compile(r'[^\u4e00-\u9fa5]+')
+    multiple_space_pattern = re.compile(r'\s+')
+
+    def tokenizer_cn(text):
+        text = zhconv.convert(text, 'zh-hans').strip()
+        text = non_chinese_pattern.sub(' ', text)
+        text = multiple_space_pattern.sub(' ', text)
+        words = jieba.lcut(text)
+        words = [word for word in words if word.strip() != '']
+        return words
+
+    def preproc_cn(docs):
+        stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
+        stop_words = set(stop_words)
+        docs = [tokenizer_cn(doc) for doc in docs]
+        docs = [[word for word in document if word not in stop_words] for document in docs]
+        docs = [''.join(doc) for doc in docs]
+        return docs
+
+    print(time.ctime(), '\tLoading data...')
+    g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
+    print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
+    attrs = pickle.load(open('../data/wd/attrs', 'rb'))
+    anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
+    print(time.ctime(), '\t # of Anchors:', len(anchors))
+
+    docs = []
+    for i in range(len(attrs)):
+        v = attrs[i]
+        text = v[2]
+        docs.append(text)
+    print('原始文档数量:', len(docs))
+
+    # 对文本进行预处理
+    topic = preproc_cn(docs)
+    print('预处理后文档数量:', len(topic))
+    print('示例文档:', topic[0])
+    for seed in [42]:
+        for d in [768]:
+            # emb_m = word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_wd.pkl')
+            # emb_m = my_embed(topic, g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
+            #                 between_network_contrastive=True, initial_embed_path='initial_embeddings_wd.pkl', type='cn')
+            #
+            # emb_m = pickle.load(open('../emb/word2vec_embeddings_wd.pkl', 'rb'))
+            # print(emb_m.shape)
+            # print(time.ctime(), '\tNetwork embedding...')
+            emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768, batch_size=20,
+                                            contrastive=True, epochs=50, learning_rate=0.001,
+                                            initial_embed_path1='initial_embeddings1_wd.pkl', initial_embed_path2='initial_embeddings2_wd.pkl')
+            emb_g1.update(emb_g2)
+            emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
+
+            # emb_m, emb_g1, emb_g2 = joint_embed(
+            #     g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.01,
+            #     emb_m_contrastive=False,
+            #     emb_s_contrastive=True,
+            #     initial_embed_emb_m_path='word2vec_embeddings_wd.pkl',
+            #     initial_embed_emb_s_path1='initial_embeddings1_wd.pkl',
+            #     initial_embed_emb_s_path2='initial_embeddings2_wd.pkl'
+            # )
+            # #
             # emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
             # emb_s = np.vstack([emb_g1, emb_g2])
             # emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
             #
-            # pickle.dump((emb_m, emb_s), open('../emb/emb_dblp_1_joint_initial', 'wb'))
-
-
+            # pickle.dump((emb_m, emb_s), open('../emb/emb_wd_joint_initial', 'wb'))
 
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 config = tf.compat.v1.ConfigProto()
 config.gpu_options.allow_growth = True
-inputs = 0
+inputs = 1
 if int(inputs) == 0:
     print('Embedding dataset: dblp')
     embed_dblp()
 else:
     print('Embedding dataset: wd')
+    embed_wd()
