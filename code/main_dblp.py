@@ -36,15 +36,24 @@ print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
 datasets = dataset(anchors)
 
 
-def psearch(emb, K, reg, seed):
-    test = datasets.get('test', n=1982, seed=seed)
-    train = datasets.get('train', n=850, seed=seed)
+def psearch(emb, K, reg, train_ratio,seed):
+    # test = datasets.get('test', n=2587, seed=seed)
+    # train = datasets.get('train', n=1109, seed=seed)
+    # print(test)
+    # test = datasets.get('test', n=1982, seed=seed)
+    # train = datasets.get('train', n=850, seed=seed)
+    with open(f'train_anchors_dblp_2_{train_ratio}.pkl', 'rb') as f:
+        train = pickle.load(f)
+    with open(f'test_anchors_dblp_2_{train_ratio}.pkl', 'rb') as f:
+        test = pickle.load(f)
+
     traindata = []
-    for k, v in train:
+    for k, v in train.items():  # 假设 train 是一个字典
         traindata.append([emb[k], emb[v]])
     traindata = np.array(traindata)
+
     testdata = []
-    for k, v in test:
+    for k, v in test.items():  # 假设 test 是一个字典
         testdata.append([emb[k], emb[v]])
     testdata = np.array(testdata)
 
@@ -58,6 +67,7 @@ def psearch(emb, K, reg, seed):
 
     mrr = compute_mrr(sim_matrix)
     score.append(mrr)
+
     return score
 
 
@@ -67,21 +77,23 @@ if __name__ == '__main__':
 
     for seed in [41]:
         d = 768
-        emb_m, emb_s = pickle.load(open('../emb/emb_dblp_1_joint_initial', 'rb'))
-        emb_m = pickle.load(open('word2vec_embeddings_dblp_1.pkl', 'rb'))
-        emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
-        emb_all = np.concatenate((emb_m, emb_s), axis=-1)
-        # print(f"emb_all shape: {emb_all.shape}")
+        emb_a, emb_s = pickle.load(open('../emb/emb_dblp_2_joint_initial', 'rb'))
+        emb_a = (emb_a - np.mean(emb_a, axis=0, keepdims=True)) / np.std(emb_a, axis=0, keepdims=True)
+        emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+        print(emb_a.shape)
+        print(emb_s.shape)
+        emb_all = np.concatenate((emb_a, emb_s), axis=-1)
 
-        for model_idx in [0, 1, 2]:
-            emb = [emb_m, emb_s, emb_all][model_idx]
+        train_ratio = 0.7
+        for model_idx in [0,1,2]:
+            emb = [emb_a,emb_s,emb_all][model_idx]
             model_name = ['EFC-UIL-a', 'EFC-UIL-s', 'EFC-UIL'][model_idx]
             dim = emb.shape[-1]
             for K in [[120], [120], [120]][model_idx]:
-                for reg in [100, 1000]:
+                for reg in [1000]:
                     score = []
                     seed_ = list(range(10))
-                    score_10 = pool.map(partial(psearch, emb, K, reg), seed_)
+                    score_10 = pool.map(partial(psearch, emb, K, reg, train_ratio), seed_)
                     score_10 = np.array(score_10)
                     assert score_10.shape == (10, 4)
                     score = np.mean(score_10, axis=0)
