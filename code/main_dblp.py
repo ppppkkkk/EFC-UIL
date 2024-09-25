@@ -424,8 +424,9 @@ def contrastive_loss(pos_embeddings, neg_embeddings, initial_embeddings, tempera
     return loss.mean()
 
 
-def EFCUIL(G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, lr_a=0.005, lr_s=0.001, train_ratio=0.7,
+def EFCUIL(G1, G2, anchors, model_moe, batch_size=20, temperature=0.05, epochs=20, lr_a=0.005, lr_s=0.001, lr_moe=1e-6, train_ratio=0.7,
                 emb_a_contrastive=True, emb_s_contrastive=True,
+                moe = True,
                 initial_embed_emb_a_path='initial_embeddings.pkl',
                 initial_embed_emb_s_path1='initial_embeddings1.pkl',
                 initial_embed_emb_s_path2='initial_embeddings2.pkl',
@@ -468,11 +469,13 @@ def EFCUIL(G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, lr_a=0.0
     contrastive_model_a2 = ContrastiveLearningModel(embeddings_a2).to(device)
     contrastive_embeddings1 = ContrastiveLearningModel(embeddings1_array).to(device)
     contrastive_embeddings2 = ContrastiveLearningModel(embeddings2_array).to(device)
+    model_moe.to(device)
 
     optimizer_a1 = torch.optim.Adam(contrastive_model_a1.parameters(), lr=lr_a)
     optimizer_a2 = torch.optim.Adam(contrastive_model_a2.parameters(), lr=lr_a)
     optimizer2 = torch.optim.Adam(contrastive_embeddings1.parameters(), lr=lr_s)
     optimizer3 = torch.optim.Adam(contrastive_embeddings2.parameters(), lr=lr_s)
+    optimizer_moe = torch.optim.Adam(model_moe.parameters(), lr=lr_moe)
 
     if os.path.exists(train_anchors_path) and os.path.exists(test_anchors_path):
         # 文件存在，直接读取
@@ -508,12 +511,14 @@ def EFCUIL(G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, lr_a=0.0
     node_to_idx_G2 = {node: idx for idx, node in enumerate(G2.nodes())}
 
     for epoch in range(epochs):
+        model_moe.train()
         combined_loss = None
 
         optimizer_a1.zero_grad()
         optimizer_a2.zero_grad()
         optimizer2.zero_grad()
         optimizer3.zero_grad()
+        optimizer_moe.zero_grad()
 
         # 文档对比学习
         if emb_a_contrastive:
@@ -589,19 +594,55 @@ def EFCUIL(G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, lr_a=0.0
                 else:
                     combined_loss += loss_s
 
+        if moe:
+            emb_a1 = contrastive_model_a1().detach().cpu().numpy()
+            emb_a2 = contrastive_model_a2().detach().cpu().numpy()
+            emb_g1 = contrastive_embeddings1().detach().cpu().numpy()
+            emb_g2 = contrastive_embeddings2().detach().cpu().numpy()
+            emb_a = np.vstack([emb_a1, emb_a2])
+            emb_s = np.vstack([emb_g1, emb_g2])
+            emb_a = (emb_a - np.mean(emb_a, axis=0, keepdims=True)) / np.std(emb_a, axis=0, keepdims=True)
+            emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+            attribute_pairs, structure_pairs = generate_pairs(train_anchors, emb_a, emb_s)
+
+            for i in range(0, len(attribute_pairs), batch_size):
+                batch_attr_pairs = attribute_pairs[i:i + batch_size]
+                batch_struct_pairs = structure_pairs[i:i + batch_size]
+
+                batch_attr_pairs = torch.tensor(batch_attr_pairs, dtype=torch.float32).to(device)
+                batch_struct_pairs = torch.tensor(batch_struct_pairs, dtype=torch.float32).to(device)
+
+                emb_k_m = batch_attr_pairs[:, 0, :]
+                emb_v_m = batch_attr_pairs[:, 1, :]
+                emb_k_s = batch_struct_pairs[:, 0, :]
+                emb_v_s = batch_struct_pairs[:, 1, :]
+
+                output_k = model(emb_k_m, emb_k_s)
+                output_v = model(emb_v_m, emb_v_s)
+
+                l2_loss = torch.norm(output_k - output_v, p=2, dim=-1)
+                loss_moe = torch.mean(l2_loss)
+
+                if combined_loss is None:  # 初始化 combined_loss
+                    combined_loss = loss_moe
+                else:
+                    combined_loss += loss_moe
+
         if combined_loss is not None:
             combined_loss.backward()
             optimizer_a1.step()
             optimizer_a2.step()
             optimizer2.step()
             optimizer3.step()
+            optimizer_moe.step()
 
             print(f"Epoch {epoch + 1}/{epochs}, Combined Loss: {combined_loss.item() / len(anchors)}")
         else:
             print(f"Epoch {epoch + 1}/{epochs}, No Loss Computed.")
 
-    return contrastive_model_a1().detach().cpu().numpy(), contrastive_model_a2().detach().cpu().numpy(), \
+    return model_moe, contrastive_model_a1().detach().cpu().numpy(), contrastive_model_a2().detach().cpu().numpy(), \
            contrastive_embeddings1().detach().cpu().numpy(), contrastive_embeddings2().detach().cpu().numpy()
+
 
 
 anchors = dict(json.load(open('../data/dblp/anchors.txt', 'r')))
@@ -635,7 +676,7 @@ if __name__ == '__main__':
         print(f"Attribute pairs shape: {attribute_pairs.shape}")
         print(f"Structure pairs shape: {structure_pairs.shape}")
 
-        train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning_rate=0.000001)
+        train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning_rate=1e-6)
 
         for model_idx in [0]:
             model_name = ['EFC-UIL'][model_idx]
