@@ -105,29 +105,7 @@
 #     json.dump(result, open('result_MAUIL_dblp.txt', 'w'))
 
 
-import numpy as np
-import json, pickle, time, os
-from multiprocessing import Pool
-from functools import partial
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from align import align_cca
-from utils import dataset, get_sim, hit_precision
-import random
 
-# 定义专家网络（FFN）
-class FFN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(FFN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-        self.relu = nn.ReLU()
-
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
 
 
 # 定义门控网络（Router）
@@ -192,6 +170,31 @@ class FFN(nn.Module):
 #             final_output = torch.cat([moe_output, combined_input], dim=-1)
 #
 #         return final_output
+import numpy as np
+import json, pickle, time, os
+from multiprocessing import Pool
+from functools import partial
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from align import align_cca
+from utils import dataset, get_sim, hit_precision
+import random
+
+
+class FFN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(FFN, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+
 class Router(nn.Module):
     def __init__(self, input_dim, num_experts):
         super(Router, self).__init__()
@@ -211,28 +214,18 @@ class MoELayer(nn.Module):
         self.experts = nn.ModuleList([FFN(input_dim, hidden_dim, output_dim) for _ in range(num_experts)])
         self.router = Router(input_dim, num_experts)
 
-    def forward(self, x_m, x_s, use_fixed_weights=True):
-        if use_fixed_weights:
-            # 初始权重固定为 0.5
-            weights_a = torch.full((x_m.size(0), 2), 0.5, device=x_m.device)
-            weights_s = torch.full((x_s.size(0), 2), 0.5, device=x_s.device)
-        else:
-            # 正常通过 Router 计算专家权重
-            weights_a, weights_s = self.router(x_m, x_s)
+    def forward(self, x_m, x_s):
 
-        # 根据不同权重和专家网络生成加权输出
+        weights_a, weights_s = self.router(x_m, x_s)
+
         expert_outputs_a = torch.stack([expert(x_m) for expert in self.experts], dim=-1)
         expert_outputs_s = torch.stack([expert(x_s) for expert in self.experts], dim=-1)
 
-        # 分别加权 emb_a 和 emb_s 的专家输出
         output_a = torch.sum(expert_outputs_a * weights_a.unsqueeze(1), dim=-1)
         output_s = torch.sum(expert_outputs_s * weights_s.unsqueeze(1), dim=-1)
 
-        # 将加权后的 emb_a 和 emb_s 拼接
         final_output = torch.cat([output_a, output_s], dim=-1)
-
-        return final_output  # 只返回拼接后的结果
-
+        return final_output
 
 
 class TransformerWithMoE(nn.Module):
@@ -240,29 +233,32 @@ class TransformerWithMoE(nn.Module):
         super(TransformerWithMoE, self).__init__()
         self.layers = nn.ModuleList([
             nn.Sequential(
-                nn.MultiheadAttention(embed_dim=input_dim, num_heads=8),
+                # nn.MultiheadAttention(embed_dim=input_dim, num_heads=8),
                 nn.LayerNorm(input_dim),
-                MoELayer(input_dim, hidden_dim, output_dim, num_experts)
+                MoELayer(input_dim, hidden_dim, output_dim, num_experts),
+                nn.LayerNorm(output_dim * 2)
             )
             for _ in range(num_layers)
         ])
 
-    def forward(self, x_m, x_s, use_fixed_weights=True):
+    def forward(self, x_m, x_s):
         for layer in self.layers:
-            # 分别对 x_m 和 x_s 进行注意力机制
-            attn_output_m, _ = layer[0](x_m, x_m, x_m)
-            attn_output_s, _ = layer[0](x_s, x_s, x_s)
+            # 注意力机制
+            # attn_output_m, _ = layer[0](x_m, x_m, x_m)
+            # attn_output_s, _ = layer[0](x_s, x_s, x_s)
 
             # Add & Norm
-            x_m = layer[1](attn_output_m + x_m)
-            x_s = layer[1](attn_output_s + x_s)
+            x_m = layer[0](x_m)
+            x_s = layer[0](x_s)
 
             combined_input = torch.cat([x_m, x_s], dim=-1)
-            moe_output = layer[2](x_m, x_s, use_fixed_weights)
+            moe_output = layer[1](x_m, x_s)
 
-            final_output = torch.cat([moe_output, combined_input], dim=-1)
+            # final_output = torch.cat([moe_output, combined_input], dim=-1)
+            # final_output = moe_output + combined_input
+            final_output = layer[2](combined_input + moe_output)
+
         return final_output
-
 
 
 def train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning_rate=0.001, batch_size=32,
@@ -281,7 +277,6 @@ def train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning
             batch_attr_pairs = attribute_pairs[i:i + batch_size]
             batch_struct_pairs = structure_pairs[i:i + batch_size]
 
-            # 将数据转化为 tensor 并移动到设备
             batch_attr_pairs = torch.tensor(batch_attr_pairs, dtype=torch.float32).to(device)
             batch_struct_pairs = torch.tensor(batch_struct_pairs, dtype=torch.float32).to(device)
 
@@ -300,14 +295,12 @@ def train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning
             # print(f"Weights for emb_v_m: {weights_a_v}")
             # print(f"Weights for emb_v_s: {weights_s_v}")
 
-            # 计算 L2 距离 (欧氏距离)
             l2_loss = torch.norm(output_k - output_v, p=2, dim=-1)
             loss = torch.mean(l2_loss)
 
             optimizer.zero_grad()
             loss.backward()
 
-            # 应用梯度裁剪
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
 
             total_loss += loss.item()
@@ -317,6 +310,7 @@ def train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning
         scheduler.step(total_loss / len(attribute_pairs))
 
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {total_loss / len(attribute_pairs):.4f}')
+
 
 def compute_mrr(sim_matrix):
     mrr_sum = 0.0
@@ -340,17 +334,14 @@ def compute_mrr(sim_matrix):
     return mrr_sum / num_queries
 
 
-def psearch(emb_a, emb_s, K, reg, seed, trained_model, train_ratio):
+def psearch(emb_a, emb_s, K, reg, dataset, trained_model, train_ratio):
     moe_model = trained_model
     moe_model.eval()
-    # # test = datasets.get('test', n=2587, seed=seed)
-    # # train = datasets.get('train', n=1108, seed=seed)
-    # test = datasets.get('test', n=1982, seed=seed)
-    # train = datasets.get('train', n=850, seed=seed)
-    with open(f'train_anchors_dblp_2_{train_ratio}.pkl', 'rb') as f:
+    with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
         train = pickle.load(f)
-    with open(f'test_anchors_dblp_2_{train_ratio}.pkl', 'rb') as f:
+    with open(f'test_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
         test = pickle.load(f)
+
     traindata = []
     for k, v in train.items():
         emb_k_m = torch.tensor(emb_a[k], dtype=torch.float32).unsqueeze(0)
@@ -366,8 +357,8 @@ def psearch(emb_a, emb_s, K, reg, seed, trained_model, train_ratio):
 
         traindata.append([emb_k, emb_v])
     traindata = np.array(traindata)
-    testdata = []
 
+    testdata = []
     for k, v in test.items():
         emb_k_m = torch.tensor(emb_a[k], dtype=torch.float32).unsqueeze(0)
         emb_k_s = torch.tensor(emb_s[k], dtype=torch.float32).unsqueeze(0)
@@ -407,9 +398,9 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def psearch_with_seed(seed, emb_a, emb_s, K, reg, trained_model, train_ratio):
+def psearch_with_seed(seed, emb_a, emb_s, K, reg, dataset, trained_model, train_ratio):
     set_seed(seed)
-    return psearch(emb_a, emb_s, K, reg, seed, trained_model, train_ratio)
+    return psearch(emb_a, emb_s, K, reg, dataset, trained_model, train_ratio)
 
 
 def generate_pairs(anchors, emb_a, emb_s):
@@ -435,17 +426,16 @@ g1, g2 = pickle.load(open('../data/dblp/networks', 'rb'))
 print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
 datasets = dataset(anchors)
 
-
 if __name__ == '__main__':
     seed_value = 42
     set_seed(seed_value)
     train_ratio = 0.7
     pool = Pool(min(16, os.cpu_count() - 2))
     result = []
-
+    dataset = 'dblp_1'
     for seed in [seed_value]:
         d = 768  # 输入维度
-        emb_a, emb_s = pickle.load(open('../emb/emb_dblp_2_joint_initial', 'rb'))
+        emb_a, emb_s = pickle.load(open(f'../emb/emb_{dataset}_joint_initial', 'rb'))
         emb_a = (emb_a - np.mean(emb_a, axis=0, keepdims=True)) / np.std(emb_a, axis=0, keepdims=True)
         emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
         print(emb_a.shape)
@@ -453,9 +443,9 @@ if __name__ == '__main__':
         emb_all = np.concatenate((emb_a, emb_s), axis=-1)
         model = TransformerWithMoE(input_dim=768, hidden_dim=512, output_dim=768, num_experts=2, num_layers=1)
         print(f"Model initialized: {type(model)}")
-        with open(f'train_anchors_dblp_2_{train_ratio}.pkl', 'rb') as f:
+        with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
             train_anchors = pickle.load(f)
-        # 设置随机数种子，确保训练过程可重复
+
         set_seed(seed_value)
         attribute_pairs, structure_pairs = generate_pairs(train_anchors, emb_a, emb_s)
 
@@ -466,14 +456,14 @@ if __name__ == '__main__':
 
         # 对模型进行测试和评估
         for model_idx in [0]:
-            emb = [emb_all][model_idx]
             model_name = ['EFC-UIL'][model_idx]
-            dim = emb.shape[-1]
+            dim = 768
             for K in [[120]][model_idx]:
                 for reg in [1000]:
                     score = []
                     seed_ = list(range(10))
-                    psearch_partial = partial(psearch_with_seed, emb_a=emb_a, emb_s=emb_s, K=K, reg=reg, trained_model=model, train_ratio=train_ratio)
+                    psearch_partial = partial(psearch_with_seed, emb_a=emb_a, emb_s=emb_s, K=K, reg=reg, dataset=dataset,
+                                              trained_model=model, train_ratio=train_ratio)
                     score_10 = pool.map(psearch_partial, seed_)
                     score_10 = np.array(score_10)
                     assert score_10.shape == (10, 4)
@@ -486,4 +476,4 @@ if __name__ == '__main__':
                     print(record)
 
     # 将结果保存到文件中，保留4位小数
-    json.dump(result, open('result_MAUIL_dblp.txt', 'w'), indent=4)
+    json.dump(result, open('result_EFC-UIL_dblp.txt', 'w'), indent=4)
