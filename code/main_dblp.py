@@ -180,6 +180,7 @@ import torch.optim as optim
 from align import align_cca
 from utils import dataset, get_sim, hit_precision
 import random
+import networkx as nx
 
 
 class FFN(nn.Module):
@@ -261,12 +262,9 @@ class TransformerWithMoE(nn.Module):
         return final_output
 
 
-def train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning_rate=0.001, batch_size=32,
-                device='cpu'):
+def train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning_rate=0.001, batch_size=32, device='cpu'):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
 
-    clip_value = 1.0
     model.to(device)
 
     for epoch in range(num_epochs):
@@ -288,26 +286,14 @@ def train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning
             output_k = model(emb_k_m, emb_k_s)
             output_v = model(emb_v_m, emb_v_s)
 
-            # # 打印当前 batch 的权重
-            # print(f"Epoch {epoch+1} - Batch {i//batch_size+1}")
-            # print(f"Weights for emb_k_m: {weights_a_k}")
-            # print(f"Weights for emb_k_s: {weights_s_k}")
-            # print(f"Weights for emb_v_m: {weights_a_v}")
-            # print(f"Weights for emb_v_s: {weights_s_v}")
-
             l2_loss = torch.norm(output_k - output_v, p=2, dim=-1)
             loss = torch.mean(l2_loss)
 
             optimizer.zero_grad()
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-
             total_loss += loss.item()
             optimizer.step()
-
-        # 更新学习率调度器
-        scheduler.step(total_loss / len(attribute_pairs))
 
         print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {total_loss / len(attribute_pairs):.4f}')
 
@@ -420,6 +406,204 @@ def generate_pairs(anchors, emb_a, emb_s):
     return np.array(attribute_pairs), np.array(structure_pairs)
 
 
+class ContrastiveLearningModel(nn.Module):
+    def __init__(self, initial_embeddings):
+        super(ContrastiveLearningModel, self).__init__()
+        self.embeddings = nn.Parameter(torch.tensor(initial_embeddings, dtype=torch.float32))
+
+    def forward(self):
+        return self.embeddings
+
+
+def contrastive_loss(pos_embeddings, neg_embeddings, initial_embeddings, temperature=0.05):
+    pos_similarity = nn.functional.cosine_similarity(initial_embeddings, pos_embeddings)
+    neg_similarity = nn.functional.cosine_similarity(initial_embeddings.unsqueeze(1), neg_embeddings)
+    neg_similarity_sum = torch.sum(torch.exp(neg_similarity / temperature), dim=1)
+    pos_exp = torch.exp(pos_similarity / temperature)
+    loss = -torch.log(pos_exp / (pos_exp + neg_similarity_sum))
+    return loss.mean()
+
+
+def EFCUIL(G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, lr_a=0.005, lr_s=0.001, train_ratio=0.7,
+                emb_a_contrastive=True, emb_s_contrastive=True,
+                initial_embed_emb_a_path='initial_embeddings.pkl',
+                initial_embed_emb_s_path1='initial_embeddings1.pkl',
+                initial_embed_emb_s_path2='initial_embeddings2.pkl',
+                train_anchors_path='train_anchors.pkl', test_anchors_path='test_anchors.pkl'):
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    # 加载文档嵌入
+    if os.path.exists(initial_embed_emb_a_path):
+        with open(initial_embed_emb_a_path, 'rb') as f:
+            numpy_array_initial = pickle.load(f)
+        print(f"Loaded initial embeddings from {initial_embed_emb_a_path}")
+
+    # 加载网络嵌入
+    if os.path.exists(initial_embed_emb_s_path1) and os.path.exists(initial_embed_emb_s_path2):
+        with open(initial_embed_emb_s_path1, 'rb') as f1, open(initial_embed_emb_s_path2, 'rb') as f2:
+            embeddings1 = pickle.load(f1)
+            embeddings2 = pickle.load(f2)
+        print(f"Loaded initial embeddings from {initial_embed_emb_s_path1} and {initial_embed_emb_s_path2}")
+
+    # 文档嵌入部分
+    embeddings_a1 = numpy_array_initial[:len(G1.nodes())]
+    print(embeddings_a1.shape)
+    embeddings_a2 = numpy_array_initial[len(G1.nodes()):]
+    print(embeddings_a2.shape)
+    embeddings1_array = np.array([v for v in embeddings1.values()])
+    embeddings2_array = np.array([v for v in embeddings2.values()])
+
+    if emb_a_contrastive:
+        embeddings_a1 = (embeddings_a1 - np.mean(embeddings_a1, axis=0, keepdims=True)) / np.std(
+            embeddings_a1, axis=0, keepdims=True)
+        embeddings_a2 = (embeddings_a2 - np.mean(embeddings_a2, axis=0, keepdims=True)) / np.std(
+            embeddings_a2, axis=0, keepdims=True)
+    if emb_s_contrastive:
+        embeddings1_array = (embeddings1_array - np.mean(embeddings1_array, axis=0, keepdims=True)) / np.std(
+            embeddings1_array, axis=0, keepdims=True)
+        embeddings2_array = (embeddings2_array - np.mean(embeddings2_array, axis=0, keepdims=True)) / np.std(
+            embeddings2_array, axis=0, keepdims=True)
+
+    contrastive_model_a1 = ContrastiveLearningModel(embeddings_a1).to(device)
+    contrastive_model_a2 = ContrastiveLearningModel(embeddings_a2).to(device)
+    contrastive_embeddings1 = ContrastiveLearningModel(embeddings1_array).to(device)
+    contrastive_embeddings2 = ContrastiveLearningModel(embeddings2_array).to(device)
+
+    optimizer_a1 = torch.optim.Adam(contrastive_model_a1.parameters(), lr=lr_a)
+    optimizer_a2 = torch.optim.Adam(contrastive_model_a2.parameters(), lr=lr_a)
+    optimizer2 = torch.optim.Adam(contrastive_embeddings1.parameters(), lr=lr_s)
+    optimizer3 = torch.optim.Adam(contrastive_embeddings2.parameters(), lr=lr_s)
+
+    if os.path.exists(train_anchors_path) and os.path.exists(test_anchors_path):
+        # 文件存在，直接读取
+        with open(train_anchors_path, 'rb') as f:
+            train_anchors = pickle.load(f)
+        with open(test_anchors_path, 'rb') as f:
+            test_anchors = pickle.load(f)
+        print(f"Loaded train_anchors from {train_anchors_path} and test_anchors from {test_anchors_path}")
+    else:
+        # 文件不存在，生成并保存
+        anchor_items = list(anchors.items())
+        random.shuffle(anchor_items)
+
+        num_train_anchors = int(train_ratio * len(anchor_items))  # 抽取 70% 作为训练数据
+        train_anchors = dict(anchor_items[:num_train_anchors])
+        test_anchors = dict(anchor_items[num_train_anchors:])  # 剩余部分作为测试数据
+
+        # 存储 train_anchors 和 test_anchors
+        with open(train_anchors_path, 'wb') as f:
+            pickle.dump(train_anchors, f)
+        with open(test_anchors_path, 'wb') as f:
+            pickle.dump(test_anchors, f)
+
+        print(f"Generated and saved train_anchors to {train_anchors_path} and test_anchors to {test_anchors_path}")
+
+    # 开始网络间的对比学习
+    if not nx.is_directed(G1):
+        G1 = G1.to_directed()
+    if not nx.is_directed(G2):
+        G2 = G2.to_directed()
+
+    node_to_idx_G1 = {node: idx for idx, node in enumerate(G1.nodes())}
+    node_to_idx_G2 = {node: idx for idx, node in enumerate(G2.nodes())}
+
+    for epoch in range(epochs):
+        combined_loss = None
+
+        optimizer_a1.zero_grad()
+        optimizer_a2.zero_grad()
+        optimizer2.zero_grad()
+        optimizer3.zero_grad()
+
+        # 文档对比学习
+        if emb_a_contrastive:
+            anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
+
+            for anchor_node1, anchor_node2 in train_anchors.items():
+                anchor_embeds1.append(contrastive_model_a1.embeddings[node_to_idx_G1[anchor_node1]])
+                anchor_embeds2.append(contrastive_model_a2.embeddings[node_to_idx_G2[anchor_node2]])
+
+                neighbors2 = list(G2.neighbors(anchor_node2))
+                neg_embeds1.extend(
+                    [contrastive_model_a2.embeddings[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
+
+                neighbors1 = list(G1.neighbors(anchor_node1))
+                neg_embeds2.extend(
+                    [contrastive_model_a1.embeddings[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
+
+            num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
+
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
+
+                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
+                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
+
+                loss_m = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
+                                          temperature=temperature) + \
+                         contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
+                                          temperature=temperature)
+
+                if combined_loss is None:  # 初始化 combined_loss
+                    combined_loss = loss_m
+                else:
+                    combined_loss += loss_m
+
+        # 网络对比学习
+        if emb_s_contrastive:
+            anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
+
+            for anchor_node1, anchor_node2 in train_anchors.items():
+                anchor_embeds1.append(contrastive_embeddings1.embeddings[node_to_idx_G1[anchor_node1]])
+                anchor_embeds2.append(contrastive_embeddings2.embeddings[node_to_idx_G2[anchor_node2]])
+
+                neighbors2 = list(G2.neighbors(anchor_node2))
+                neg_embeds1.extend(
+                    [contrastive_embeddings2.embeddings[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
+
+                neighbors1 = list(G1.neighbors(anchor_node1))
+                neg_embeds2.extend(
+                    [contrastive_embeddings1.embeddings[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
+
+            num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
+
+            for batch_idx in range(num_batches):
+                batch_start = batch_idx * batch_size
+                batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
+
+                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
+                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
+                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
+
+                loss_s = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
+                                          temperature=temperature) + \
+                         contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
+                                          temperature=temperature)
+
+                if combined_loss is None:  # 初始化 combined_loss
+                    combined_loss = loss_s
+                else:
+                    combined_loss += loss_s
+
+        if combined_loss is not None:
+            combined_loss.backward()
+            optimizer_a1.step()
+            optimizer_a2.step()
+            optimizer2.step()
+            optimizer3.step()
+
+            print(f"Epoch {epoch + 1}/{epochs}, Combined Loss: {combined_loss.item() / len(anchors)}")
+        else:
+            print(f"Epoch {epoch + 1}/{epochs}, No Loss Computed.")
+
+    return contrastive_model_a1().detach().cpu().numpy(), contrastive_model_a2().detach().cpu().numpy(), \
+           contrastive_embeddings1().detach().cpu().numpy(), contrastive_embeddings2().detach().cpu().numpy()
+
+
 anchors = dict(json.load(open('../data/dblp/anchors.txt', 'r')))
 print(time.ctime(), '\t # of Anchors:', len(anchors))
 g1, g2 = pickle.load(open('../data/dblp/networks', 'rb'))
@@ -440,7 +624,6 @@ if __name__ == '__main__':
         emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
         print(emb_a.shape)
         print(emb_s.shape)
-        emb_all = np.concatenate((emb_a, emb_s), axis=-1)
         model = TransformerWithMoE(input_dim=768, hidden_dim=512, output_dim=768, num_experts=2, num_layers=1)
         print(f"Model initialized: {type(model)}")
         with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
@@ -451,10 +634,9 @@ if __name__ == '__main__':
 
         print(f"Attribute pairs shape: {attribute_pairs.shape}")
         print(f"Structure pairs shape: {structure_pairs.shape}")
-        # 训练模型
-        train_model(attribute_pairs, structure_pairs, model, num_epochs=20, learning_rate=0.000001)
 
-        # 对模型进行测试和评估
+        train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning_rate=0.000001)
+
         for model_idx in [0]:
             model_name = ['EFC-UIL'][model_idx]
             dim = 768
