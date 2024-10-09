@@ -1,175 +1,111 @@
-# import numpy as np
-# import json, pickle, time, os
-# from multiprocessing import Pool
-# from functools import partial
-# from align import align_cca
-# from utils import dataset, get_sim, hit_precision
-#
-#
-# # 计算MRR
-# def compute_mrr(sim_matrix):
-#     mrr_sum = 0.0
-#     num_queries = sim_matrix.shape[0]
-#
-#     for i in range(num_queries):
-#         row_data = sim_matrix.getrow(i)
-#         indices = row_data.indices
-#         data = row_data.data
-#
-#         missing_indices = set(range(num_queries)) - set(indices)
-#         indices = list(indices) + list(missing_indices)
-#         data = list(data) + [0.0] * len(missing_indices)
-#
-#         sorted_indices = [index for _, index in sorted(zip(data, indices), reverse=True)]
-#
-#         rank = sorted_indices.index(i) + 1
-#
-#         mrr_sum += 1.0 / rank
-#
-#     return mrr_sum / num_queries
-#
-#
-# anchors = dict(json.load(open('../data/dblp/anchors.txt', 'r')))
-# print(time.ctime(), '\t # of Anchors:', len(anchors))
-# g1, g2 = pickle.load(open('../data/dblp/networks', 'rb'))
-# print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
-# datasets = dataset(anchors)
-#
-#
-# def psearch(emb, K, reg, train_ratio,seed):
-#     # test = datasets.get('test', n=2587, seed=seed)
-#     # train = datasets.get('train', n=1109, seed=seed)
-#     # print(test)
-#     # test = datasets.get('test', n=1982, seed=seed)
-#     # train = datasets.get('train', n=850, seed=seed)
-#     with open(f'train_anchors_dblp_2_{train_ratio}.pkl', 'rb') as f:
-#         train = pickle.load(f)
-#     with open(f'test_anchors_dblp_2_{train_ratio}.pkl', 'rb') as f:
-#         test = pickle.load(f)
-#
-#     traindata = []
-#     for k, v in train.items():  # 假设 train 是一个字典
-#         traindata.append([emb[k], emb[v]])
-#     traindata = np.array(traindata)
-#
-#     testdata = []
-#     for k, v in test.items():  # 假设 test 是一个字典
-#         testdata.append([emb[k], emb[v]])
-#     testdata = np.array(testdata)
-#
-#     zx, zy = align_cca(traindata, testdata, K=K, reg=reg)
-#
-#     sim_matrix = get_sim(zx, zy, top_k=10)
-#     score = []
-#     for top_k in [1, 5, 10]:
-#         score_ = hit_precision(sim_matrix, top_k=top_k)
-#         score.append(score_)
-#
-#     mrr = compute_mrr(sim_matrix)
-#     score.append(mrr)
-#
-#     return score
-#
-#
-# if __name__ == '__main__':
-#     pool = Pool(min(16, os.cpu_count() - 2))
-#     result = []
-#
-#     for seed in [41]:
-#         d = 768
-#         emb_a, emb_s = pickle.load(open('../emb/emb_dblp_2_joint_initial', 'rb'))
-#         emb_a = (emb_a - np.mean(emb_a, axis=0, keepdims=True)) / np.std(emb_a, axis=0, keepdims=True)
-#         emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
-#         print(emb_a.shape)
-#         print(emb_s.shape)
-#         emb_all = np.concatenate((emb_a, emb_s), axis=-1)
-#
-#         train_ratio = 0.7
-#         for model_idx in [0,1,2]:
-#             emb = [emb_a,emb_s,emb_all][model_idx]
-#             model_name = ['EFC-UIL-a', 'EFC-UIL-s', 'EFC-UIL'][model_idx]
-#             dim = emb.shape[-1]
-#             for K in [[120], [120], [120]][model_idx]:
-#                 for reg in [1000]:
-#                     score = []
-#                     seed_ = list(range(10))
-#                     score_10 = pool.map(partial(psearch, emb, K, reg, train_ratio), seed_)
-#                     score_10 = np.array(score_10)
-#                     assert score_10.shape == (10, 4)
-#                     score = np.mean(score_10, axis=0)
-#                     score = np.round(score, 4)
-#                     record = [seed, d, model_name, K, reg] + score.tolist()
-#                     result.append(record)
-#                     print(record)
-#
-#     json.dump(result, open('result_MAUIL_dblp.txt', 'w'))
+'''
+import numpy as np
+import json, pickle, time, os
+from multiprocessing import Pool
+from functools import partial
+from align import align_cca
+from utils import dataset, get_sim, hit_precision
+
+
+# 计算MRR
+def compute_mrr(sim_matrix):
+    mrr_sum = 0.0
+    num_queries = sim_matrix.shape[0]
+
+    for i in range(num_queries):
+        row_data = sim_matrix.getrow(i)
+        indices = row_data.indices
+        data = row_data.data
+
+        missing_indices = set(range(num_queries)) - set(indices)
+        indices = list(indices) + list(missing_indices)
+        data = list(data) + [0.0] * len(missing_indices)
+
+        sorted_indices = [index for _, index in sorted(zip(data, indices), reverse=True)]
+
+        rank = sorted_indices.index(i) + 1
+
+        mrr_sum += 1.0 / rank
+
+    return mrr_sum / num_queries
+
+
+anchors = dict(json.load(open('../data/dblp/anchors.txt', 'r')))
+print(time.ctime(), '\t # of Anchors:', len(anchors))
+g1, g2 = pickle.load(open('../data/dblp/networks', 'rb'))
+print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
+datasets = dataset(anchors)
+
+
+def psearch(emb, K, reg, dataset, train_ratio, seed):
+    with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
+        train = pickle.load(f)
+    with open(f'test_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
+        test = pickle.load(f)
+
+    traindata = []
+    for k, v in train.items():  # 假设 train 是一个字典
+        traindata.append([emb[k], emb[v]])
+    traindata = np.array(traindata)
+
+    testdata = []
+    for k, v in test.items():  # 假设 test 是一个字典
+        testdata.append([emb[k], emb[v]])
+    testdata = np.array(testdata)
+
+    zx, zy = align_cca(traindata, testdata, K=K, reg=reg)
+
+    sim_matrix = get_sim(zx, zy, top_k=10)
+    score = []
+    for top_k in [1, 5, 10]:
+        score_ = hit_precision(sim_matrix, top_k=top_k)
+        score.append(score_)
+
+    mrr = compute_mrr(sim_matrix)
+    score.append(mrr)
+
+    return score
+
+
+if __name__ == '__main__':
+    pool = Pool(min(16, os.cpu_count() - 2))
+    result = []
+    seed_value = 42
+    train_ratio = 0.7
+    dataset = 'dblp_1'
+    for seed in [42]:
+        dim = 768
+        emb_a, emb_s = pickle.load(open(f'../emb/emb_{dataset}_joint_initial', 'rb'))
+        emb_a = (emb_a - np.mean(emb_a, axis=0, keepdims=True)) / np.std(emb_a, axis=0, keepdims=True)
+        emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+        print(emb_a.shape)
+        print(emb_s.shape)
+        emb_all = np.concatenate((emb_a, emb_s), axis=-1)
+
+        for model_idx in [0,1]:
+            emb = [emb_s,emb_all][model_idx]
+            model_name = ['EFC-UIL_s','EFC-UIL'][model_idx]
+            for K in [[120], [120], [120]][model_idx]:
+                for reg in [1000]:
+                    score = []
+                    seed_ = list(range(10))
+                    score_10 = pool.map(partial(psearch, emb, K, reg, dataset, train_ratio), seed_)
+                    score_10 = np.array(score_10)
+                    assert score_10.shape == (10, 4)
+                    score = np.mean(score_10, axis=0)
+                    score = np.round(score, 4)
+                    record = [seed, dim, model_name, K, reg] + score.tolist()
+                    result.append(record)
+                    print(record)
+
+    json.dump(result, open('result_EFCUIL_dblp.txt', 'w'))
 
 
 
 
 
-# 定义门控网络（Router）
-# class Router(nn.Module):
-#     def __init__(self, input_dim, num_experts):
-#         super(Router, self).__init__()
-#         self.fc = nn.Linear(input_dim, num_experts)
-#
-#     def forward(self, x):
-#         # 输出为每个专家的权重
-#         weights = torch.softmax(self.fc(x), dim=-1)
-#         return weights
-#
-#
-# class MoELayer(nn.Module):
-#     def __init__(self, input_dim, hidden_dim, output_dim, num_experts):
-#         super(MoELayer, self).__init__()
-#         self.experts = nn.ModuleList([FFN(input_dim, hidden_dim, output_dim) for _ in range(num_experts)])
-#         self.router = Router(input_dim, num_experts)
-#
-#     def forward(self, x):
-#         # 计算每个专家的权重得分
-#         z = self.router(x)
-#         # 通过softmax将得分归一化为选择权重
-#         weights = torch.softmax(z, dim=-1)
-#         # print(f"Normalized weights: {weights.shape}")
-#         expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=-1)
-#         # print(f"Expert outputs: {expert_outputs.shape}")
-#         output = torch.sum(expert_outputs * weights.unsqueeze(1), dim=-1)
-#         # print(f"Final weighted output: {output.shape}")
-#
-#         return output
-#
-#
-# class TransformerWithMoE(nn.Module):
-#     def __init__(self, input_dim, hidden_dim, output_dim, num_experts, num_layers):
-#         super(TransformerWithMoE, self).__init__()
-#         self.layers = nn.ModuleList([
-#             nn.Sequential(
-#                 nn.MultiheadAttention(embed_dim=input_dim, num_heads=8),
-#                 nn.LayerNorm(input_dim),
-#                 MoELayer(input_dim * 2, hidden_dim, output_dim, num_experts),
-#                 nn.LayerNorm(output_dim)
-#             )
-#             for _ in range(num_layers)
-#         ])
-#
-#     def forward(self, x_m, x_s):
-#         for layer in self.layers:
-#             # 分别对 x_m 和 x_s 进行注意力机制
-#             attn_output_m, _ = layer[0](x_m, x_m, x_m)
-#             attn_output_s, _ = layer[0](x_s, x_s, x_s)
-#
-#             # Add & Norm
-#             x_m = layer[1](attn_output_m + x_m)
-#             x_s = layer[1](attn_output_s + x_s)
-#
-#             combined_input = torch.cat([x_m, x_s], dim=-1)
-#
-#             moe_output = layer[2](combined_input)
-#
-#             final_output = torch.cat([moe_output, combined_input], dim=-1)
-#
-#         return final_output
+'''
+
 import numpy as np
 import json, pickle, time, os
 from multiprocessing import Pool
@@ -244,19 +180,13 @@ class TransformerWithMoE(nn.Module):
 
     def forward(self, x_m, x_s):
         for layer in self.layers:
-            # 注意力机制
-            # attn_output_m, _ = layer[0](x_m, x_m, x_m)
-            # attn_output_s, _ = layer[0](x_s, x_s, x_s)
 
-            # Add & Norm
             x_m = layer[0](x_m)
             x_s = layer[0](x_s)
 
             combined_input = torch.cat([x_m, x_s], dim=-1)
             moe_output = layer[1](x_m, x_s)
 
-            # final_output = torch.cat([moe_output, combined_input], dim=-1)
-            # final_output = moe_output + combined_input
             final_output = layer[2](combined_input + moe_output)
 
         return final_output
@@ -321,22 +251,30 @@ def compute_mrr(sim_matrix):
 
 
 def psearch(emb_a, emb_s, K, reg, dataset, trained_model, train_ratio):
-    moe_model = trained_model
+    # 设置设备为cuda或cpu
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 确保模型在设备上
+    moe_model = trained_model.to(device)
     moe_model.eval()
+
+    # 加载train和test anchors
     with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
         train = pickle.load(f)
     with open(f'test_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
         test = pickle.load(f)
 
+    # 处理训练数据
     traindata = []
     for k, v in train.items():
-        emb_k_m = torch.tensor(emb_a[k], dtype=torch.float32).unsqueeze(0)
-        emb_k_s = torch.tensor(emb_s[k], dtype=torch.float32).unsqueeze(0)
-        emb_v_m = torch.tensor(emb_a[v], dtype=torch.float32).unsqueeze(0)
-        emb_v_s = torch.tensor(emb_s[v], dtype=torch.float32).unsqueeze(0)
+        emb_k_m = torch.tensor(emb_a[k], dtype=torch.float32).unsqueeze(0).to(device)
+        emb_k_s = torch.tensor(emb_s[k], dtype=torch.float32).unsqueeze(0).to(device)
+        emb_v_m = torch.tensor(emb_a[v], dtype=torch.float32).unsqueeze(0).to(device)
+        emb_v_s = torch.tensor(emb_s[v], dtype=torch.float32).unsqueeze(0).to(device)
 
-        emb_k = moe_model(emb_k_m, emb_k_s).detach().numpy()
-        emb_v = moe_model(emb_v_m, emb_v_s).detach().numpy()
+        # 将模型和张量都放在同一设备上
+        emb_k = moe_model(emb_k_m, emb_k_s).detach().cpu().numpy()
+        emb_v = moe_model(emb_v_m, emb_v_s).detach().cpu().numpy()
 
         emb_k = emb_k.squeeze()
         emb_v = emb_v.squeeze()
@@ -344,20 +282,55 @@ def psearch(emb_a, emb_s, K, reg, dataset, trained_model, train_ratio):
         traindata.append([emb_k, emb_v])
     traindata = np.array(traindata)
 
+    # 处理测试数据
     testdata = []
     for k, v in test.items():
-        emb_k_m = torch.tensor(emb_a[k], dtype=torch.float32).unsqueeze(0)
-        emb_k_s = torch.tensor(emb_s[k], dtype=torch.float32).unsqueeze(0)
-        emb_v_m = torch.tensor(emb_a[v], dtype=torch.float32).unsqueeze(0)
-        emb_v_s = torch.tensor(emb_s[v], dtype=torch.float32).unsqueeze(0)
+        emb_k_m = torch.tensor(emb_a[k], dtype=torch.float32).unsqueeze(0).to(device)
+        emb_k_s = torch.tensor(emb_s[k], dtype=torch.float32).unsqueeze(0).to(device)
+        emb_v_m = torch.tensor(emb_a[v], dtype=torch.float32).unsqueeze(0).to(device)
+        emb_v_s = torch.tensor(emb_s[v], dtype=torch.float32).unsqueeze(0).to(device)
 
-        emb_k = moe_model(emb_k_m, emb_k_s).detach().numpy()
-        emb_v = moe_model(emb_v_m, emb_v_s).detach().numpy()
+        emb_k = moe_model(emb_k_m, emb_k_s).detach().cpu().numpy()
+        emb_v = moe_model(emb_v_m, emb_v_s).detach().cpu().numpy()
 
         emb_k = emb_k.squeeze()
         emb_v = emb_v.squeeze()
 
         testdata.append([emb_k, emb_v])
+    testdata = np.array(testdata)
+
+    # CCA对齐
+    zx, zy = align_cca(traindata, testdata, K=K, reg=reg)
+
+    # 计算相似度矩阵
+    sim_matrix = get_sim(zx, zy, top_k=10)
+
+    # 计算评分
+    score = []
+    for top_k in [1, 5, 10]:
+        score_ = hit_precision(sim_matrix, top_k=top_k)
+        score.append(score_)
+
+    mrr = compute_mrr(sim_matrix)
+    score.append(mrr)
+
+    return score
+
+
+def psearch_without_moe(emb, K, reg, dataset, train_ratio, seed):
+    with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
+        train = pickle.load(f)
+    with open(f'test_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
+        test = pickle.load(f)
+
+    traindata = []
+    for k, v in train.items():  # 假设 train 是一个字典
+        traindata.append([emb[k], emb[v]])
+    traindata = np.array(traindata)
+
+    testdata = []
+    for k, v in test.items():  # 假设 test 是一个字典
+        testdata.append([emb[k], emb[v]])
     testdata = np.array(testdata)
 
     zx, zy = align_cca(traindata, testdata, K=K, reg=reg)
@@ -370,8 +343,8 @@ def psearch(emb_a, emb_s, K, reg, dataset, trained_model, train_ratio):
 
     mrr = compute_mrr(sim_matrix)
     score.append(mrr)
-    return score
 
+    return score
 
 def set_seed(seed):
     random.seed(seed)
@@ -426,7 +399,7 @@ def contrastive_loss(pos_embeddings, neg_embeddings, initial_embeddings, tempera
 
 def EFCUIL(G1, G2, anchors, model_moe, batch_size=20, temperature=0.05, epochs=20, lr_a=0.005, lr_s=0.001, lr_moe=1e-6, train_ratio=0.7,
                 emb_a_contrastive=True, emb_s_contrastive=True,
-                moe = True,
+                moe=True,
                 initial_embed_emb_a_path='initial_embeddings.pkl',
                 initial_embed_emb_s_path1='initial_embeddings1.pkl',
                 initial_embed_emb_s_path2='initial_embeddings2.pkl',
@@ -453,12 +426,12 @@ def EFCUIL(G1, G2, anchors, model_moe, batch_size=20, temperature=0.05, epochs=2
     print(embeddings_a2.shape)
     embeddings1_array = np.array([v for v in embeddings1.values()])
     embeddings2_array = np.array([v for v in embeddings2.values()])
-
-    if emb_a_contrastive:
-        embeddings_a1 = (embeddings_a1 - np.mean(embeddings_a1, axis=0, keepdims=True)) / np.std(
-            embeddings_a1, axis=0, keepdims=True)
-        embeddings_a2 = (embeddings_a2 - np.mean(embeddings_a2, axis=0, keepdims=True)) / np.std(
-            embeddings_a2, axis=0, keepdims=True)
+    #dblp_1注释掉, dblp_2用11,wd用01
+    # if emb_a_contrastive:
+    #     embeddings_a1 = (embeddings_a1 - np.mean(embeddings_a1, axis=0, keepdims=True)) / np.std(
+    #         embeddings_a1, axis=0, keepdims=True)
+    #     embeddings_a2 = (embeddings_a2 - np.mean(embeddings_a2, axis=0, keepdims=True)) / np.std(
+    #         embeddings_a2, axis=0, keepdims=True)
     if emb_s_contrastive:
         embeddings1_array = (embeddings1_array - np.mean(embeddings1_array, axis=0, keepdims=True)) / np.std(
             embeddings1_array, axis=0, keepdims=True)
@@ -489,7 +462,7 @@ def EFCUIL(G1, G2, anchors, model_moe, batch_size=20, temperature=0.05, epochs=2
         anchor_items = list(anchors.items())
         random.shuffle(anchor_items)
 
-        num_train_anchors = int(train_ratio * len(anchor_items))  # 抽取 70% 作为训练数据
+        num_train_anchors = int(train_ratio * len(anchor_items))  # 抽取 train_ratio 作为训练数据
         train_anchors = dict(anchor_items[:num_train_anchors])
         test_anchors = dict(anchor_items[num_train_anchors:])  # 剩余部分作为测试数据
 
@@ -548,9 +521,9 @@ def EFCUIL(G1, G2, anchors, model_moe, batch_size=20, temperature=0.05, epochs=2
                 batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
 
                 loss_m = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
-                                          temperature=temperature) + \
+                                          temperature=0.1) + \
                          contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
-                                          temperature=temperature)
+                                          temperature=0.1)
 
                 if combined_loss is None:  # 初始化 combined_loss
                     combined_loss = loss_m
@@ -617,8 +590,8 @@ def EFCUIL(G1, G2, anchors, model_moe, batch_size=20, temperature=0.05, epochs=2
                 emb_k_s = batch_struct_pairs[:, 0, :]
                 emb_v_s = batch_struct_pairs[:, 1, :]
 
-                output_k = model(emb_k_m, emb_k_s)
-                output_v = model(emb_v_m, emb_v_s)
+                output_k = model_moe(emb_k_m, emb_k_s)
+                output_v = model_moe(emb_v_m, emb_v_s)
 
                 l2_loss = torch.norm(output_k - output_v, p=2, dim=-1)
                 loss_moe = torch.mean(l2_loss)
@@ -645,9 +618,9 @@ def EFCUIL(G1, G2, anchors, model_moe, batch_size=20, temperature=0.05, epochs=2
 
 
 
-anchors = dict(json.load(open('../data/dblp/anchors.txt', 'r')))
+anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
 print(time.ctime(), '\t # of Anchors:', len(anchors))
-g1, g2 = pickle.load(open('../data/dblp/networks', 'rb'))
+g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
 print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
 datasets = dataset(anchors)
 
@@ -655,39 +628,72 @@ if __name__ == '__main__':
     seed_value = 42
     set_seed(seed_value)
     train_ratio = 0.7
-    pool = Pool(min(16, os.cpu_count() - 2))
     result = []
-    dataset = 'dblp_1'
+    dataset = 'wd'
+    emb_a_contrastive = False
+    emb_s_contrastive = True
+    moe = True
     for seed in [seed_value]:
         d = 768  # 输入维度
-        emb_a, emb_s = pickle.load(open(f'../emb/emb_{dataset}_joint_initial', 'rb'))
+        # emb_a, emb_s = pickle.load(open(f'../emb/emb_{dataset}_joint_initial', 'rb'))
+        # emb_a = (emb_a - np.mean(emb_a, axis=0, keepdims=True)) / np.std(emb_a, axis=0, keepdims=True)
+        # emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
+        # print(emb_a.shape)
+        # print(emb_s.shape)
+        model_moe = TransformerWithMoE(input_dim=768, hidden_dim=512, output_dim=768, num_experts=2, num_layers=1)
+        # print(f"Model initialized: {type(model_moe)}")
+        # with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
+        #     train_anchors = pickle.load(f)
+        #
+        # set_seed(seed_value)
+        # attribute_pairs, structure_pairs = generate_pairs(train_anchors, emb_a, emb_s)
+        #
+        # print(f"Attribute pairs shape: {attribute_pairs.shape}")
+        # print(f"Structure pairs shape: {structure_pairs.shape}")
+        #
+        # train_model(attribute_pairs, structure_pairs, model_moe, num_epochs=20, learning_rate=1e-6)
+
+        model_moe, emb_a1, emb_a2, emb_g1, emb_g2 = EFCUIL(G1=g1, G2=g2, anchors=anchors, model_moe=model_moe,
+                                                           batch_size=20, temperature=0.05, epochs=20, lr_a=0.5,
+                                                           lr_s=0.00005,
+                                                           lr_moe=1e-6, train_ratio=train_ratio,
+                                                           emb_a_contrastive=emb_a_contrastive,
+                                                           emb_s_contrastive=emb_s_contrastive,
+                                                           moe=moe,
+                                                           initial_embed_emb_a_path=f'test.pkl',
+                                                           initial_embed_emb_s_path1=f'initial_embeddings1_{dataset}.pkl',
+                                                           initial_embed_emb_s_path2=f'initial_embeddings2_{dataset}.pkl',
+                                                           train_anchors_path=f'train_anchors_{dataset}_{train_ratio}.pkl',
+                                                           test_anchors_path=f'test_anchors_{dataset}_{train_ratio}.pkl')
+
+        emb_a = np.vstack([emb_a1, emb_a2])
+        emb_s = np.vstack([emb_g1, emb_g2])
+
         emb_a = (emb_a - np.mean(emb_a, axis=0, keepdims=True)) / np.std(emb_a, axis=0, keepdims=True)
         emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
-        print(emb_a.shape)
-        print(emb_s.shape)
-        model = TransformerWithMoE(input_dim=768, hidden_dim=512, output_dim=768, num_experts=2, num_layers=1)
-        print(f"Model initialized: {type(model)}")
-        with open(f'train_anchors_{dataset}_{train_ratio}.pkl', 'rb') as f:
-            train_anchors = pickle.load(f)
 
-        set_seed(seed_value)
-        attribute_pairs, structure_pairs = generate_pairs(train_anchors, emb_a, emb_s)
-
-        print(f"Attribute pairs shape: {attribute_pairs.shape}")
-        print(f"Structure pairs shape: {structure_pairs.shape}")
-
-        train_model(attribute_pairs, structure_pairs, model, num_epochs=10, learning_rate=1e-6)
+        emb_all = np.concatenate((emb_a, emb_s), axis=-1)
 
         for model_idx in [0]:
             model_name = ['EFC-UIL'][model_idx]
+            emb = [emb_all][model_idx]
             dim = 768
             for K in [[120]][model_idx]:
                 for reg in [1000]:
                     score = []
                     seed_ = list(range(10))
-                    psearch_partial = partial(psearch_with_seed, emb_a=emb_a, emb_s=emb_s, K=K, reg=reg, dataset=dataset,
-                                              trained_model=model, train_ratio=train_ratio)
-                    score_10 = pool.map(psearch_partial, seed_)
+
+                    # 替换掉多线程，直接使用 for 循环
+                    score_10 = []
+                    for seed_value in seed_:
+                        if moe == True:
+                            score_result = psearch_with_seed(emb_a=emb_a, emb_s=emb_s, K=K, reg=reg, dataset=dataset,
+                                                             trained_model=model_moe, train_ratio=train_ratio,
+                                                             seed=seed_value)
+                        else:
+                            score_result = psearch_without_moe(emb, K, reg, dataset, train_ratio, seed_)
+                        score_10.append(score_result)
+
                     score_10 = np.array(score_10)
                     assert score_10.shape == (10, 4)
                     score = np.mean(score_10, axis=0)
@@ -699,4 +705,5 @@ if __name__ == '__main__':
                     print(record)
 
     # 将结果保存到文件中，保留4位小数
-    json.dump(result, open('result_EFC-UIL_dblp.txt', 'w'), indent=4)
+    json.dump(result, open(f'result_EFC-UIL_{dataset}_{train_ratio}.txt', 'w'), indent=4)
+

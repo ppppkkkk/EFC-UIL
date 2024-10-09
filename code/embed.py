@@ -16,34 +16,12 @@ import jieba
 import zhconv
 import re
 from gensim.models import Word2Vec
+from gensim.corpora import Dictionary
+from gensim import utils,models
+from sentence_transformers import SentenceTransformer
 
 stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
 tf.compat.v1.disable_v2_behavior()
-
-
-class ContrastiveLearningModel(nn.Module):
-    def __init__(self, initial_embeddings):
-        super(ContrastiveLearningModel, self).__init__()
-        self.embeddings = nn.Parameter(torch.tensor(initial_embeddings, dtype=torch.float32))
-
-    def forward(self):
-        return self.embeddings
-
-
-def contrastive_loss(pos_embeddings, neg_embeddings, initial_embeddings, temperature=0.05):
-    pos_similarity = nn.functional.cosine_similarity(initial_embeddings, pos_embeddings)
-    neg_similarity = nn.functional.cosine_similarity(initial_embeddings.unsqueeze(1), neg_embeddings)
-    neg_similarity_sum = torch.sum(torch.exp(neg_similarity / temperature), dim=1)
-    pos_exp = torch.exp(pos_similarity / temperature)
-    loss = -torch.log(pos_exp / (pos_exp + neg_similarity_sum))
-    return loss.mean()
-
-
-def batch_tokenize(model, docs, device):
-    tokenized = [model.tokenize([doc]) for doc in docs]
-    tokenized = [{key: value.to(device) for key, value in doc.items()} for doc in tokenized]
-    return tokenized
-
 
 def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
                    initial_embed_path='.pkl'):
@@ -54,30 +32,35 @@ def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
         print(f"Loaded word2vec embeddings from {initial_embed_path}")
         return embeddings
 
-    # 分词
-    tokenized_docs = [doc.split() for doc in docs]
+    docs_part1 = docs[:9714]
+    docs_part2 = docs[-9526:]
 
-    # 训练 Word2Vec 模型
+    # tokenized_docs_part1 = [doc.split() for doc in docs_part1]
+    # tokenized_docs_part2 = [doc.split() for doc in docs_part2]
+
     print("Training Word2Vec model...")
-    word2vec_model = Word2Vec(sentences=tokenized_docs, vector_size=embed_size, window=window, min_count=min_count,
+    all_tokenized_docs = docs_part1 + docs_part2
+    word2vec_model = Word2Vec(sentences=all_tokenized_docs, vector_size=embed_size, window=window, min_count=min_count,
                               workers=workers)
 
-    # 为每个文档生成嵌入
-    print("Generating document embeddings...")
-    embeddings = []
-    for doc in tokenized_docs:
-        # 过滤掉不在词汇表中的单词
-        valid_words = [word for word in doc if word in word2vec_model.wv]
+    def generate_embeddings(tokenized_docs):
+        embeddings = []
+        for doc in tokenized_docs:
+            valid_words = [word for word in doc if word in word2vec_model.wv]
 
-        if len(valid_words) > 0:
-            # 计算文档中每个单词的嵌入向量的平均值作为文档的嵌入
-            doc_embedding = np.mean([word2vec_model.wv[word] for word in valid_words], axis=0)
-            embeddings.append(doc_embedding)
-        else:
-            # 如果文档为空或没有有效的词汇，使用零向量填充
-            embeddings.append(np.zeros(embed_size))
+            if len(valid_words) > 0:
+                doc_embedding = np.mean([word2vec_model.wv[word] for word in valid_words], axis=0)
+                embeddings.append(doc_embedding)
+            else:
+                embeddings.append(np.zeros(embed_size))
+        return np.array(embeddings)
 
-    embeddings = np.array(embeddings)
+    print("Generating document embeddings for the first documents...")
+    embeddings_part1 = generate_embeddings(docs_part1)
+
+    print("Generating document embeddings for the last documents...")
+    embeddings_part2 = generate_embeddings(docs_part2)
+    embeddings = np.concatenate((embeddings_part1, embeddings_part2), axis=0)
 
     # 保存嵌入到文件
     with open(initial_embed_path, 'wb') as f:
@@ -85,124 +68,6 @@ def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
     print(f"Word2Vec embeddings saved to {initial_embed_path}")
 
     return embeddings
-
-
-def my_embed(docs, G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
-             between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_1.pkl'):
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model_name = '../bert-base-uncased'
-    torch.backends.cudnn.benchmark = True  # 启用 CuDNN 的自动优化
-
-    model = ConSERT(model_name, device=device)
-    model.__setattr__("max_seq_length", 512)
-    model.to(device)
-
-    # 检查是否存在初始嵌入文件
-    if os.path.exists(initial_embed_path):
-        with open(initial_embed_path, 'rb') as f:
-            numpy_array_initial = pickle.load(f)
-        print(f"Loaded initial embeddings from {initial_embed_path}")
-    else:
-        # 生成初始嵌入
-        embed = []
-        model.eval()
-        with torch.no_grad():
-            for i in range(0, len(docs), batch_size):
-                batch_docs = docs[i:i + batch_size]
-                tokenized = batch_tokenize(model, batch_docs, device)
-                with autocast():
-                    out_features = [model.forward(features) for features in tokenized]
-                    embeddings = torch.cat([out['sentence_embedding'] for out in out_features])
-                    embed.append(embeddings)
-                    del embeddings
-                    torch.cuda.empty_cache()
-
-        numpy_array_initial = torch.cat(embed, dim=0).cpu().detach().numpy()
-
-        with open(initial_embed_path, 'wb') as f:
-            pickle.dump(numpy_array_initial, f)
-        print(f"Initial embeddings saved to {initial_embed_path}")
-
-    # 生成 contrastive_model
-    contrastive_model = ContrastiveLearningModel(numpy_array_initial).to(device)
-
-    optimizer = torch.optim.Adam(contrastive_model.parameters(), lr=learning_rate)
-
-    # 开始网络间的对比学习
-    if not nx.is_directed(G1):
-        G1 = G1.to_directed()
-    if not nx.is_directed(G2):
-        G2 = G2.to_directed()
-
-    node_to_idx_G1 = {node: idx for idx, node in enumerate(G1.nodes())}
-    node_to_idx_G2 = {node: idx for idx, node in enumerate(G2.nodes())}
-
-    if between_network_contrastive:
-        for epoch in range(epochs):
-            total_loss = 0.0
-            print(f"Epoch {epoch + 1}/{epochs}")
-
-            anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
-
-            # 遍历锚点并生成嵌入和负样本
-            for anchor_node1, anchor_node2 in anchors.items():
-                anchor_node1, anchor_node2 = anchor_node1, anchor_node2
-
-                # 直接从 contrastive_model.embeddings 中获取锚点嵌入
-                anchor_embeds1.append(contrastive_model.embeddings[node_to_idx_G1[anchor_node1]])
-                anchor_embeds2.append(contrastive_model.embeddings[node_to_idx_G2[anchor_node2]])
-
-                # 选择 anchor_node2 的所有邻居作为 anchor_node1 的负样本
-                neighbors2 = list(G2.neighbors(anchor_node2))
-                neg_embeds1.extend([contrastive_model.embeddings[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
-
-                # 选择 anchor_node1 的所有邻居作为 anchor_node2 的负样本
-                neighbors1 = list(G1.neighbors(anchor_node1))
-                neg_embeds2.extend([contrastive_model.embeddings[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
-
-            # 分批处理锚点和负样本
-            num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
-
-            for batch_idx in range(num_batches):
-                batch_start = batch_idx * batch_size
-                batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
-
-                # 将当前批次的嵌入转换为 numpy.ndarray，然后转换为 torch.tensor
-                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
-                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
-
-                optimizer.zero_grad()  # 清空梯度
-
-                # 使用自定义的对比损失函数
-                loss = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
-                                        temperature=temperature) + \
-                       contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
-                                        temperature=temperature)
-
-                total_loss += loss.item()
-
-                # 反向传播
-                loss.backward()
-                optimizer.step()
-
-            print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(anchors)}")
-
-    print("between_network_contrastive finish")
-
-    # 生成最终的嵌入
-    final_embeddings_G1 = contrastive_model.embeddings[
-        [node_to_idx_G1[node] for node in G1.nodes()]].cpu().detach().numpy()
-    final_embeddings_G2 = contrastive_model.embeddings[
-        [node_to_idx_G2[node] for node in G2.nodes()]].cpu().detach().numpy()
-
-    # 将 G1 和 G2 的最终嵌入拼接在一起
-    final_embeddings = np.concatenate([final_embeddings_G1, final_embeddings_G2], axis=0)
-
-    print(f"Final concatenated embeddings shape: {final_embeddings.shape}")
-
-    return final_embeddings
 
 
 def densify_graphs(G1, G2, anchors):
@@ -251,10 +116,6 @@ def network_embed(G1, G2, anchors, dim=768, batch_size=20,
     G1 = nx.relabel_nodes(G1, lambda x: str(x))
     G2 = nx.relabel_nodes(G2, lambda x: str(x))
 
-    # 创建节点到索引的映射
-    node_to_idx_G1 = {node: idx for idx, node in enumerate(G1.nodes())}
-    node_to_idx_G2 = {node: idx for idx, node in enumerate(G2.nodes())}
-
     # 图 densification 处理
     G1, G2 = densify_graphs(G1, G2, anchors)
 
@@ -288,260 +149,10 @@ def network_embed(G1, G2, anchors, dim=768, batch_size=20,
             pickle.dump(embeddings2, f2)
         print(f"Initial embeddings saved to {initial_embed_path1} and {initial_embed_path2}")
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-    # 将 embeddings1 和 embeddings2 转换为 numpy 数组并确保顺序正确
     embeddings1 = np.array([embeddings1[node] for node in G1.nodes()])
     embeddings2 = np.array([embeddings2[node] for node in G2.nodes()])
 
-    # 使用 ContrastiveLearningModel 初始化嵌入
-    model1 = ContrastiveLearningModel(embeddings1).to(device)
-    model2 = ContrastiveLearningModel(embeddings2).to(device)
-
-    optimizer1 = torch.optim.Adam(model1.parameters(), lr=learning_rate)
-    optimizer2 = torch.optim.Adam(model2.parameters(), lr=learning_rate)
-
-    # 对比学习处理
-    if contrastive:
-        for epoch in range(epochs):
-            total_loss = 0.0
-            print(f"Epoch {epoch + 1}/{epochs}")
-
-            anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
-
-            # 使用训练锚点进行训练
-            for anchor_node1, anchor_node2 in train_anchors.items():
-                anchor_node1, anchor_node2 = str(anchor_node1), str(anchor_node2)
-
-                # 使用节点到索引的映射访问嵌入
-                anchor_embeds1.append(model1.embeddings[node_to_idx_G1[anchor_node1]])
-                anchor_embeds2.append(model2.embeddings[node_to_idx_G2[anchor_node2]])
-
-                # 选择 anchor_node2 的所有邻居作为 anchor_node1 的负样本
-                neighbors2 = list(G2.neighbors(anchor_node2))
-                neg_embeds1.extend([model2.embeddings[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
-
-                # 选择 anchor_node1 的所有邻居作为 anchor_node2 的负样本
-                neighbors1 = list(G1.neighbors(anchor_node1))
-                neg_embeds2.extend([model1.embeddings[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
-
-            # 分批处理锚点和负样本
-            num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
-
-            for batch_idx in range(num_batches):
-                batch_start = batch_idx * batch_size
-                batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
-
-                # 将当前批次的嵌入转换为 torch.tensor
-                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
-                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
-
-                optimizer1.zero_grad()  # 清空梯度
-                optimizer2.zero_grad()  # 清空梯度
-
-                # 使用自定义的对比损失函数，并将两个 loss 合并
-                loss1 = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
-                                         temperature=0.05)
-                loss2 = contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
-                                         temperature=0.05)
-
-                combined_loss = loss1 + loss2
-                total_loss += combined_loss.item()
-
-                # 反向传播和优化器更新
-                combined_loss.backward()
-                optimizer1.step()
-                optimizer2.step()
-
-            print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(train_anchors)}")
-
-    # 获取最终的嵌入
-    final_embeddings1 = model1.embeddings.detach().cpu().numpy()
-    final_embeddings2 = model2.embeddings.detach().cpu().numpy()
-
-    return final_embeddings1, final_embeddings2
-
-
-def joint_embed(G1, G2, anchors, batch_size=20, temperature=0.05, epochs=20, lr_a=0.005, lr_s=0.001, train_ratio=0.7,
-                emb_a_contrastive=True, emb_s_contrastive=True,
-                initial_embed_emb_a_path='initial_embeddings_dblp_1.pkl',
-                initial_embed_emb_s_path1='initial_embeddings1_dblp_1.pkl',
-                initial_embed_emb_s_path2='initial_embeddings2_dblp_1.pkl',
-                train_anchors_path='train_anchors.pkl', test_anchors_path='test_anchors.pkl'):
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-    # 加载文档嵌入
-    if os.path.exists(initial_embed_emb_a_path):
-        with open(initial_embed_emb_a_path, 'rb') as f:
-            numpy_array_initial = pickle.load(f)
-        print(f"Loaded initial embeddings from {initial_embed_emb_a_path}")
-
-    # 加载网络嵌入
-    if os.path.exists(initial_embed_emb_s_path1) and os.path.exists(initial_embed_emb_s_path2):
-        with open(initial_embed_emb_s_path1, 'rb') as f1, open(initial_embed_emb_s_path2, 'rb') as f2:
-            embeddings1 = pickle.load(f1)
-            embeddings2 = pickle.load(f2)
-        print(f"Loaded initial embeddings from {initial_embed_emb_s_path1} and {initial_embed_emb_s_path2}")
-
-    # 文档嵌入部分
-    embeddings_a1 = numpy_array_initial[:len(G1.nodes())]
-    print(embeddings_a1.shape)
-    embeddings_a2 = numpy_array_initial[len(G1.nodes()):]
-    print(embeddings_a2.shape)
-    embeddings1_array = np.array([v for v in embeddings1.values()])
-    embeddings2_array = np.array([v for v in embeddings2.values()])
-
-    if emb_a_contrastive:
-        embeddings_a1 = (embeddings_a1 - np.mean(embeddings_a1, axis=0, keepdims=True)) / np.std(
-            embeddings_a1, axis=0, keepdims=True)
-        embeddings_a2 = (embeddings_a2 - np.mean(embeddings_a2, axis=0, keepdims=True)) / np.std(
-            embeddings_a2, axis=0, keepdims=True)
-    if emb_s_contrastive:
-        embeddings1_array = (embeddings1_array - np.mean(embeddings1_array, axis=0, keepdims=True)) / np.std(
-            embeddings1_array, axis=0, keepdims=True)
-        embeddings2_array = (embeddings2_array - np.mean(embeddings2_array, axis=0, keepdims=True)) / np.std(
-            embeddings2_array, axis=0, keepdims=True)
-
-    contrastive_model_a1 = ContrastiveLearningModel(embeddings_a1).to(device)
-    contrastive_model_a2 = ContrastiveLearningModel(embeddings_a2).to(device)
-    contrastive_embeddings1 = ContrastiveLearningModel(embeddings1_array).to(device)
-    contrastive_embeddings2 = ContrastiveLearningModel(embeddings2_array).to(device)
-
-    optimizer_a1 = torch.optim.Adam(contrastive_model_a1.parameters(), lr=lr_a)
-    optimizer_a2 = torch.optim.Adam(contrastive_model_a2.parameters(), lr=lr_a)
-    optimizer2 = torch.optim.Adam(contrastive_embeddings1.parameters(), lr=lr_s)
-    optimizer3 = torch.optim.Adam(contrastive_embeddings2.parameters(), lr=lr_s)
-
-    if os.path.exists(train_anchors_path) and os.path.exists(test_anchors_path):
-        # 文件存在，直接读取
-        with open(train_anchors_path, 'rb') as f:
-            train_anchors = pickle.load(f)
-        with open(test_anchors_path, 'rb') as f:
-            test_anchors = pickle.load(f)
-        print(f"Loaded train_anchors from {train_anchors_path} and test_anchors from {test_anchors_path}")
-    else:
-        # 文件不存在，生成并保存
-        anchor_items = list(anchors.items())
-        random.shuffle(anchor_items)
-
-        num_train_anchors = int(train_ratio * len(anchor_items))  # 抽取 70% 作为训练数据
-        train_anchors = dict(anchor_items[:num_train_anchors])
-        test_anchors = dict(anchor_items[num_train_anchors:])  # 剩余部分作为测试数据
-
-        # 存储 train_anchors 和 test_anchors
-        with open(train_anchors_path, 'wb') as f:
-            pickle.dump(train_anchors, f)
-        with open(test_anchors_path, 'wb') as f:
-            pickle.dump(test_anchors, f)
-
-        print(f"Generated and saved train_anchors to {train_anchors_path} and test_anchors to {test_anchors_path}")
-
-    # 开始网络间的对比学习
-    if not nx.is_directed(G1):
-        G1 = G1.to_directed()
-    if not nx.is_directed(G2):
-        G2 = G2.to_directed()
-
-    node_to_idx_G1 = {node: idx for idx, node in enumerate(G1.nodes())}
-    node_to_idx_G2 = {node: idx for idx, node in enumerate(G2.nodes())}
-
-    for epoch in range(epochs):
-        combined_loss = None
-
-        optimizer_a1.zero_grad()
-        optimizer_a2.zero_grad()
-        optimizer2.zero_grad()
-        optimizer3.zero_grad()
-
-        # 文档对比学习
-        if emb_a_contrastive:
-            anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
-
-            for anchor_node1, anchor_node2 in train_anchors.items():
-                anchor_embeds1.append(contrastive_model_a1.embeddings[node_to_idx_G1[anchor_node1]])
-                anchor_embeds2.append(contrastive_model_a2.embeddings[node_to_idx_G2[anchor_node2]])
-
-                neighbors2 = list(G2.neighbors(anchor_node2))
-                neg_embeds1.extend(
-                    [contrastive_model_a2.embeddings[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
-
-                neighbors1 = list(G1.neighbors(anchor_node1))
-                neg_embeds2.extend(
-                    [contrastive_model_a1.embeddings[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
-
-            num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
-
-            for batch_idx in range(num_batches):
-                batch_start = batch_idx * batch_size
-                batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
-
-                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
-                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
-
-                loss_m = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
-                                          temperature=temperature) + \
-                         contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
-                                          temperature=temperature)
-
-                if combined_loss is None:  # 初始化 combined_loss
-                    combined_loss = loss_m
-                else:
-                    combined_loss += loss_m
-
-        # 网络对比学习
-        if emb_s_contrastive:
-            anchor_embeds1, anchor_embeds2, neg_embeds1, neg_embeds2 = [], [], [], []
-
-            for anchor_node1, anchor_node2 in train_anchors.items():
-                anchor_embeds1.append(contrastive_embeddings1.embeddings[node_to_idx_G1[anchor_node1]])
-                anchor_embeds2.append(contrastive_embeddings2.embeddings[node_to_idx_G2[anchor_node2]])
-
-                neighbors2 = list(G2.neighbors(anchor_node2))
-                neg_embeds1.extend(
-                    [contrastive_embeddings2.embeddings[node_to_idx_G2[neighbor]] for neighbor in neighbors2])
-
-                neighbors1 = list(G1.neighbors(anchor_node1))
-                neg_embeds2.extend(
-                    [contrastive_embeddings1.embeddings[node_to_idx_G1[neighbor]] for neighbor in neighbors1])
-
-            num_batches = len(anchor_embeds1) // batch_size + (1 if len(anchor_embeds1) % batch_size != 0 else 0)
-
-            for batch_idx in range(num_batches):
-                batch_start = batch_idx * batch_size
-                batch_end = min((batch_idx + 1) * batch_size, len(anchor_embeds1))
-
-                batch_anchor_embeds1 = torch.stack(anchor_embeds1[batch_start:batch_end]).float().to(device)
-                batch_anchor_embeds2 = torch.stack(anchor_embeds2[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds1 = torch.stack(neg_embeds1[batch_start:batch_end]).float().to(device)
-                batch_neg_embeds2 = torch.stack(neg_embeds2[batch_start:batch_end]).float().to(device)
-
-                loss_s = contrastive_loss(batch_anchor_embeds1, batch_neg_embeds1, batch_anchor_embeds2,
-                                          temperature=temperature) + \
-                         contrastive_loss(batch_anchor_embeds2, batch_neg_embeds2, batch_anchor_embeds1,
-                                          temperature=temperature)
-
-                if combined_loss is None:  # 初始化 combined_loss
-                    combined_loss = loss_s
-                else:
-                    combined_loss += loss_s
-
-        if combined_loss is not None:
-            combined_loss.backward()
-            optimizer_a1.step()
-            optimizer_a2.step()
-            optimizer2.step()
-            optimizer3.step()
-
-            print(f"Epoch {epoch + 1}/{epochs}, Combined Loss: {combined_loss.item() / len(anchors)}")
-        else:
-            print(f"Epoch {epoch + 1}/{epochs}, No Loss Computed.")
-
-    return contrastive_model_a1().detach().cpu().numpy(), contrastive_model_a2().detach().cpu().numpy(), \
-           contrastive_embeddings1().detach().cpu().numpy(), contrastive_embeddings2().detach().cpu().numpy()
+    return embeddings1, embeddings2
 
 
 def embed_dblp():
@@ -559,112 +170,223 @@ def embed_dblp():
         topic.append(v[1])
     for seed in [42]:
         for d in [768]:
-            # emb_m = word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_dblp_2.pkl')
-            # emb_m = my_embed(topic, g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
-            #                 between_network_contrastive=True, initial_embed_path='initial_embeddings_dblp_2.pkl')
+            word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_dblp_2_test.pkl')
 
-            # emb_m = pickle.load(open('../emb/word2vec_embeddings_dblp_1.pkl', 'rb'))
-            # print(emb_m.shape)
-            # print(time.ctime(), '\tNetwork embedding...')
-            # emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768, batch_size=20,
-            #                                 contrastive=True, epochs=50, learning_rate=0.001,
-            #                                 initial_embed_path1='initial_embeddings1_dblp_2.pkl', initial_embed_path2='initial_embeddings2_dblp_2.pkl')
-            # emb_g1.update(emb_g2)
-            # emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
-            dataset = 'dblp_2'
-            train_ratio = 0.7
-            emb_a1, emb_a2, emb_g1, emb_g2 = joint_embed(g1, g2, anchors, batch_size=40, temperature=0.1, epochs=20,
-                                                         lr_a=0.01,
-                                                         lr_s=0.001,
-                                                         emb_a_contrastive=True,
-                                                         emb_s_contrastive=True,
-                                                         initial_embed_emb_a_path=f'word2vec_embeddings_{dataset}.pkl',
-                                                         initial_embed_emb_s_path1=f'initial_embeddings1_{dataset}.pkl',
-                                                         initial_embed_emb_s_path2=f'initial_embeddings2_{dataset}.pkl',
-                                                         train_ratio=train_ratio,
-                                                         train_anchors_path=f'train_anchors_{dataset}_{train_ratio}.pkl',
-                                                         test_anchors_path=f'test_anchors_{dataset}_{train_ratio}.pkl',
-                                                         )
-            emb_a = np.vstack([emb_a1, emb_a2])
-            emb_s = np.vstack([emb_g1, emb_g2])
-            pickle.dump((emb_a, emb_s), open(f'../emb/emb_{dataset}_joint_initial', 'wb'))
+
+def topic_embed(docs, dim=768):
+    dict_ = Dictionary(docs)
+
+    # Filter out words that occur less than 10 documents, or more than 50% of the documents.
+    dict_.filter_extremes(no_below=10, no_above=0.5)
+
+    corpus = [dict_.doc2bow(doc) for doc in docs]
+
+    print('Number of unique tokens: %d' % len(dict_))
+    print('Number of documents: %d' % len(corpus))
+
+    # Train LDA model.
+    # Make a index to word dictionary.
+    _ = dict_[0]  # 这里可能是bug，必须要调用一下dictionary才能确保被加载
+
+    id2word = dict_.id2token
+
+    print(time.ctime(), '\tLearning topic model...')
+    model = models.LdaModel(
+        corpus=corpus,
+        id2word=id2word,
+        chunksize=256,
+        passes=4,
+        # alpha='asymmetric',  # 1/topic_num
+        # eta='asymmetric',    # 1/topic_num
+        # distributed=True,
+        iterations=100,
+        num_topics=dim,
+        eval_every=1,
+        minimum_probability=1e-13,
+        random_state=0)
+
+    topic_dist = model.get_document_topics(corpus)
+    # 如果emb的维度低于dimension,则说明部分话题维度太小被省略了，则需要进行填充
+    embed = []
+    for i in range(len(corpus)):
+        emb = []
+        topic_i = topic_dist[i]
+
+        if len(topic_i) < dim:
+            topic_i = dict(topic_i)
+            for j in range(dim):
+                if j in topic_i.keys():
+                    emb.append(topic_i[j])
+                else:
+                    emb.append(1e-13)
+        else:
+            emb = np.array(topic_i, dtype=np.float64)[:, 1]
+
+        embed.append(emb)
+
+    embed = np.array(embed)
+
+    return embed
+
+
+def sbert_embed_chinese(docs):
+    model = SentenceTransformer('uer/sbert-base-chinese-nli', cache_folder='./hf_cache')
+    print("Generating embeddings using SBERT...")
+    embeddings = model.encode(docs, show_progress_bar=True)
+    return np.array(embeddings)
+
+
+# def embed_wd():
+#     # 简化的文本清洗步骤
+#     def clean_text(text):
+#         # 将繁体中文转换为简体中文
+#         text = zhconv.convert(text, 'zh-hans').strip()
+#         # 移除不必要的特殊符号，但保留中文、英文和数字
+#         text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\s]', '', text)
+#         text = re.sub(r'\s+', ' ', text).strip()
+#         return text
+#
+#     print(time.ctime(), '\tLoading data...')
+#     try:
+#         g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
+#         print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
+#         attrs = pickle.load(open('../data/wd/attrs', 'rb'))
+#         anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
+#         print(time.ctime(), '\t # of Anchors:', len(anchors))
+#     except FileNotFoundError as e:
+#         print(f"Error loading data: {e}")
+#         return
+#
+#     docs = [attrs[i][2] for i in range(len(attrs))]
+#     print('原始文档数量:', len(docs))
+#
+#     # 对文本进行简单的清洗
+#     cleaned_docs = [clean_text(doc) for doc in docs]
+#     print('清洗后文档数量:', len(cleaned_docs))
+#     print('示例文档:', cleaned_docs[0])
+#     print('示例文档:', cleaned_docs[min(10000, len(cleaned_docs)-1)])
+#
+#     # 使用 SBERT 生成嵌入
+#     attr_a = sbert_embed_chinese(cleaned_docs)
+#     initial_embed_path = 'sbert_embeddings_wd_test.pkl'
+#
+#     # 确保保存路径存在
+#     directory = os.path.dirname(initial_embed_path)
+#     if directory:
+#         os.makedirs(directory, exist_ok=True)
+#
+#     # 保存嵌入到文件
+#     with open(initial_embed_path, 'wb') as f:
+#         pickle.dump(attr_a, f)
+#     print(f"Embeddings saved to {initial_embed_path}")
+
+
+from sklearn.feature_extraction.text import CountVectorizer
+
+
+def embed_wd_bow():
+    # 简化的文本清洗步骤
+    def clean_text(text):
+        # 将繁体中文转换为简体中文
+        text = zhconv.convert(text, 'zh-hans').strip()
+        # 移除不必要的特殊符号，但保留中文、英文和数字
+        text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\s]', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    print(time.ctime(), '\tLoading data...')
+    try:
+        g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
+        print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
+        attrs = pickle.load(open('../data/wd/attrs', 'rb'))
+        anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
+        print(time.ctime(), '\t # of Anchors:', len(anchors))
+    except FileNotFoundError as e:
+        print(f"Error loading data: {e}")
+        return
+
+    docs = [attrs[i][2] for i in range(len(attrs))]
+    print('原始文档数量:', len(docs))
+
+    # 对文本进行简单的清洗
+    cleaned_docs = [clean_text(doc) for doc in docs]
+    print('清洗后文档数量:', len(cleaned_docs))
+    print('示例文档:', cleaned_docs[0])
+    print('示例文档:', cleaned_docs[min(10000, len(cleaned_docs) - 1)])
+
+    # 使用词袋模型生成嵌入
+    vectorizer = CountVectorizer(max_features=768)  # 设置最大特征数，可以根据需要调整
+    bow_matrix = vectorizer.fit_transform(cleaned_docs).toarray()
+
+    print('词袋嵌入矩阵的形状:', bow_matrix.shape)
+
+    initial_embed_path = 'bow_embeddings_wd_test.pkl'
+
+    # 确保保存路径存在
+    directory = os.path.dirname(initial_embed_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    # 保存词袋嵌入到文件
+    with open(initial_embed_path, 'wb') as f:
+        pickle.dump(bow_matrix, f)
+    print(f"Bag-of-Words embeddings saved to {initial_embed_path}")
 
 
 def embed_wd():
-    non_chinese_pattern = re.compile(r'[^\u4e00-\u9fa5]+')
-    multiple_space_pattern = re.compile(r'\s+')
+    import jieba, zhconv, re
+    from gensim.corpora import WikiCorpus
 
-    def tokenizer_cn(text):
-        text = zhconv.convert(text, 'zh-hans').strip()
-        text = non_chinese_pattern.sub(' ', text)
-        text = multiple_space_pattern.sub(' ', text)
-        words = jieba.lcut(text)
-        words = [word for word in words if word.strip() != '']
-        return words
+    def tokenizer_cn(text, token_min_len=10, token_max_len=100, lower=False):
+        text = zhconv.convert(text, 'zh-hans').strip()  # Standardize to simple Chinese
+        text = p.sub('', text)
+        return jieba.lcut(text)
 
-    def preproc_cn(docs):
+    def preproc_cn(docs, min_len=2, max_len=15):
+        docs = [tokenizer_cn(doc) for doc in docs]
+        # Removing Stop words
         stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
         stop_words = set(stop_words)
-        docs = [tokenizer_cn(doc) for doc in docs]
         docs = [[word for word in document if word not in stop_words] for document in docs]
-        docs = [' '.join(doc) for doc in docs]
         return docs
+
+    def topic_embed_cn(docs, dim=768):
+        return topic_embed(docs, dim=dim)
+
+    p = re.compile('[^\u4e00-\u9fa5]')
 
     print(time.ctime(), '\tLoading data...')
     g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
     print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
     attrs = pickle.load(open('../data/wd/attrs', 'rb'))
-    anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
-    print(time.ctime(), '\t # of Anchors:', len(anchors))
-
-    docs = []
+    char_corpus, word_corpus, topic_corpus = [], [], []
     for i in range(len(attrs)):
         v = attrs[i]
-        text = v[2]
-        docs.append(text)
-    print('原始文档数量:', len(docs))
+        topic_corpus.append(v[2])
+        # The index number is the node id of users in the two networks.
 
-    # 对文本进行预处理
-    topic = preproc_cn(docs)
-    print('预处理后文档数量:', len(docs))
-    print('示例文档:', topic[0])
-    print('示例文档:', topic[10000])
-    for seed in [42]:
+    print(time.ctime(), '\tPreprocessing...')
+    topic_corpus = preproc_cn(topic_corpus)
+
+    for seed in range(1):
         for d in [768]:
-            emb_m = word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_wd.pkl')
-            emb_m = my_embed(docs, g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.001,
-                             between_network_contrastive=False, initial_embed_path='bert_embeddings_wd.pkl')
-            #
-            # emb_m = pickle.load(open('../emb/word2vec_embeddings_wd.pkl', 'rb'))
-            # print(emb_m.shape)
-            # print(time.ctime(), '\tNetwork embedding...')
-            # emb_g1, emb_g2 = network_embed(g1, g2, anchors, dim=768, batch_size=20,
-            #                                 contrastive=True, epochs=50, learning_rate=0.001,
-            #                                 initial_embed_path1='initial_embeddings1_wd.pkl', initial_embed_path2='initial_embeddings2_wd.pkl')
-            # emb_g1.update(emb_g2)
-            # emb_s = np.array([emb_g1[str(i)] for i in range(len(emb_g1))])
+            print(time.ctime(), '\tTopic level attributes embedding...')
+            emb_t = word2vec_embed(topic_corpus, embed_size=d)
 
-            # emb_m, emb_g1, emb_g2 = joint_embed(
-            #     g1, g2, anchors, batch_size=20, temperature=0.05, epochs=20, learning_rate=0.01,
-            #     emb_m_contrastive=False,
-            #     emb_s_contrastive=True,
-            #     initial_embed_emb_m_path='word2vec_embeddings_wd.pkl',
-            #     initial_embed_emb_s_path1='initial_embeddings1_wd.pkl',
-            #     initial_embed_emb_s_path2='initial_embeddings2_wd.pkl'
-            # )
-            # #
-            # emb_m = (emb_m - np.mean(emb_m, axis=0, keepdims=True)) / np.std(emb_m, axis=0, keepdims=True)
-            # emb_s = np.vstack([emb_g1, emb_g2])
-            # emb_s = (emb_s - np.mean(emb_s, axis=0, keepdims=True)) / np.std(emb_s, axis=0, keepdims=True)
-            #
-            # pickle.dump((emb_m, emb_s), open('../emb/emb_wd_joint_initial', 'wb'))
+            # Standardization
+
+            emb_t = (emb_t - np.mean(emb_t, axis=0, keepdims=True)) / np.std(emb_t, axis=0, keepdims=True)
+
+            # Saving embeddings
+            pickle.dump((emb_t), open('../emb/emb_wd_seed_{}_dim_{}'.format(seed, d), 'wb'))
+
 
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 config = tf.compat.v1.ConfigProto()
 config.gpu_options.allow_growth = True
-inputs = 1
+inputs = 0
 if int(inputs) == 1:
     print('Embedding dataset: dblp')
     embed_dblp()
