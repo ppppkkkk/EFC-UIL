@@ -35,15 +35,15 @@ def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
         print(f"Loaded word2vec embeddings from {initial_embed_path}")
         return embeddings
 
-    docs_part1 = docs[0:9086]
-    docs_part2 = docs[9086:]
+    docs_part1 = docs[0:10000]
+    docs_part2 = docs[10000:]
     #如果是wd已经提前分词了
     tokenized_docs_part1 = [doc.split() for doc in docs_part1]
     tokenized_docs_part2 = [doc.split() for doc in docs_part2]
 
     print("Training Word2Vec model...")
     all_tokenized_docs = tokenized_docs_part1 + tokenized_docs_part2
-
+    # all_tokenized_docs = docs_part1 + docs_part2
     word2vec_model = Word2Vec(sentences=all_tokenized_docs, vector_size=embed_size, window=window, min_count=min_count,
                               workers=workers)
 
@@ -173,11 +173,11 @@ def embed_dblp():
         topic.append(v[1])
 
     for seed in [42]:
-        for d in [768]:
-            word2vec_embed(topic, embed_size=192, initial_embed_path='word2vec_embeddings_dblp_2_192.pkl')
-            network_embed(G1=g1, G2=g2, anchors=anchors, dim=192,
-                            initial_embed_path1='initial_embeddings1_dblp_2_192.pkl',
-                            initial_embed_path2='initial_embeddings2_dblp_2_192.pkl')
+        for d in [192]:
+            word2vec_embed(topic, embed_size=d, initial_embed_path=f'word2vec_embeddings_dblp_2_{d}.pkl')
+            network_embed(G1=g1, G2=g2, anchors=anchors, dim=d,
+                            initial_embed_path1=f'initial_embeddings1_dblp_2_{d}.pkl',
+                            initial_embed_path2=f'initial_embeddings2_dblp_2_{d}.pkl')
 
 
 
@@ -330,9 +330,11 @@ def embed_wd():
     p = re.compile('[^\u4e00-\u9fa5]')
 
     print(time.ctime(), '\tLoading data...')
-    g1, g2 = pickle.load(open('../data/dblp/dblp_1/networks', 'rb'))
+    g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
     print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
-    attrs = pickle.load(open('../data/dblp/dblp_1/attrs', 'rb'))
+    attrs = pickle.load(open('../data/wd/attrs', 'rb'))
+    anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
+    print(time.ctime(), '\t # of Anchors:', len(anchors))
     topic_corpus = []
     for i in range(len(attrs)):
         v = attrs[i]
@@ -348,13 +350,11 @@ def embed_wd():
     #
     # print(topic_corpus[17000])
     for seed in range(1):
-        for d in [768]:
-            print(time.ctime(), '\tTopic level attributes embedding...')
-            emb_t = topic_embed(topic_corpus,dim=d)
-
-            print(emb_t.shape)
-            # Saving embeddings
-            pickle.dump(emb_t, open('mauil_a_dblp_1.pkl', 'wb'))
+        for d in [1536]:
+            word2vec_embed(topic_corpus, embed_size=d, initial_embed_path=f'word2vec_embeddings_wd_{d}.pkl')
+            network_embed(G1=g1, G2=g2, anchors=anchors, dim=d,
+                            initial_embed_path1=f'initial_embeddings1_wd_{d}.pkl',
+                            initial_embed_path2=f'initial_embeddings2_wd_{d}.pkl')
 
 
 
@@ -362,7 +362,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 config = tf.compat.v1.ConfigProto()
 config.gpu_options.allow_growth = True
-inputs = 1
+inputs = 0
 if int(inputs) == 1:
     print('Embedding dataset: dblp')
     embed_dblp()
