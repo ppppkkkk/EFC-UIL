@@ -3,6 +3,10 @@ from ge import LINE
 import torch
 from sentence_transformers.ConSERT import ConSERT
 from torch.cuda.amp import autocast
+import nltk
+# nltk.download('wordnet')
+# nltk.download('stopwords')
+
 import networkx as nx
 import os
 import torch.nn as nn
@@ -12,9 +16,7 @@ import time
 import pickle
 import json
 import numpy as np
-import jieba
-import zhconv
-import re
+from collections import Counter
 from gensim.models import Word2Vec
 from gensim.corpora import Dictionary
 from gensim import utils,models
@@ -22,6 +24,7 @@ from sentence_transformers import SentenceTransformer
 
 stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
 tf.compat.v1.disable_v2_behavior()
+
 
 def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
                    initial_embed_path='.pkl'):
@@ -32,14 +35,15 @@ def word2vec_embed(docs, embed_size=768, window=5, min_count=1, workers=4,
         print(f"Loaded word2vec embeddings from {initial_embed_path}")
         return embeddings
 
-    docs_part1 = docs[:9714]
-    docs_part2 = docs[-9526:]
-
-    # tokenized_docs_part1 = [doc.split() for doc in docs_part1]
-    # tokenized_docs_part2 = [doc.split() for doc in docs_part2]
+    docs_part1 = docs[0:9086]
+    docs_part2 = docs[9086:]
+    #如果是wd已经提前分词了
+    tokenized_docs_part1 = [doc.split() for doc in docs_part1]
+    tokenized_docs_part2 = [doc.split() for doc in docs_part2]
 
     print("Training Word2Vec model...")
-    all_tokenized_docs = docs_part1 + docs_part2
+    all_tokenized_docs = tokenized_docs_part1 + tokenized_docs_part2
+
     word2vec_model = Word2Vec(sentences=all_tokenized_docs, vector_size=embed_size, window=window, min_count=min_count,
                               workers=workers)
 
@@ -104,8 +108,7 @@ def densify_graphs(G1, G2, anchors):
     return G1, G2
 
 
-def network_embed(G1, G2, anchors, dim=768, batch_size=20,
-                  contrastive=False, epochs=10, learning_rate=0.001,
+def network_embed(G1, G2, anchors, dim=768,
                   initial_embed_path1='initial_embeddings1_dblp_1.pkl',
                   initial_embed_path2='initial_embeddings2_dblp_1.pkl'):
     if not nx.is_directed(G1):
@@ -119,9 +122,9 @@ def network_embed(G1, G2, anchors, dim=768, batch_size=20,
     # 图 densification 处理
     G1, G2 = densify_graphs(G1, G2, anchors)
 
-    # 随机抽取 30% 锚点用于训练
+    # 随机抽取 70% 锚点用于训练
     anchor_items = list(anchors.items())
-    num_train_anchors = int(0.3 * len(anchor_items))  # 抽取30%
+    num_train_anchors = int(0.7 * len(anchor_items))  # 抽取30%
     train_anchors = dict(random.sample(anchor_items, num_train_anchors))  # 生成训练用的锚点字典
 
     print(f"Using {len(train_anchors)} out of {len(anchors)} anchors for training.")
@@ -157,10 +160,10 @@ def network_embed(G1, G2, anchors, dim=768, batch_size=20,
 
 def embed_dblp():
     print(time.ctime(), '\tLoading data...')
-    g1, g2 = pickle.load(open('../data/dblp/networks', 'rb'))
+    g1, g2 = pickle.load(open('../data/dblp/dblp_2/networks', 'rb'))
     print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
-    attrs = pickle.load(open('../data/dblp/attrs', 'rb'))
-    anchors = dict(json.load(open('../data/dblp/anchors.txt', 'r')))
+    attrs = pickle.load(open('../data/dblp/dblp_2/attrs', 'rb'))
+    anchors = dict(json.load(open('../data/dblp/dblp_2/anchors.txt', 'r')))
     print(time.ctime(), '\t # of Anchors:', len(anchors))
     topic = []
     for i in range(len(attrs)):
@@ -168,9 +171,14 @@ def embed_dblp():
         # dblp_1是v[2]
         # dblp_2是v[1]
         topic.append(v[1])
+
     for seed in [42]:
         for d in [768]:
-            word2vec_embed(topic, embed_size=768, initial_embed_path='word2vec_embeddings_dblp_2_test.pkl')
+            word2vec_embed(topic, embed_size=192, initial_embed_path='word2vec_embeddings_dblp_2_192.pkl')
+            network_embed(G1=g1, G2=g2, anchors=anchors, dim=192,
+                            initial_embed_path1='initial_embeddings1_dblp_2_192.pkl',
+                            initial_embed_path2='initial_embeddings2_dblp_2_192.pkl')
+
 
 
 def topic_embed(docs, dim=768):
@@ -230,155 +238,123 @@ def topic_embed(docs, dim=768):
 
 
 def sbert_embed_chinese(docs):
-    model = SentenceTransformer('uer/sbert-base-chinese-nli', cache_folder='./hf_cache')
+    model = SentenceTransformer('uer/sbert-base-chinese-nli',
+                                cache_folder='C:/Users/Ken/.cache/torch/sentence_transformers/')
     print("Generating embeddings using SBERT...")
     embeddings = model.encode(docs, show_progress_bar=True)
     return np.array(embeddings)
 
 
-# def embed_wd():
-#     # 简化的文本清洗步骤
-#     def clean_text(text):
-#         # 将繁体中文转换为简体中文
-#         text = zhconv.convert(text, 'zh-hans').strip()
-#         # 移除不必要的特殊符号，但保留中文、英文和数字
-#         text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\s]', '', text)
-#         text = re.sub(r'\s+', ' ', text).strip()
-#         return text
-#
-#     print(time.ctime(), '\tLoading data...')
-#     try:
-#         g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
-#         print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
-#         attrs = pickle.load(open('../data/wd/attrs', 'rb'))
-#         anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
-#         print(time.ctime(), '\t # of Anchors:', len(anchors))
-#     except FileNotFoundError as e:
-#         print(f"Error loading data: {e}")
-#         return
-#
-#     docs = [attrs[i][2] for i in range(len(attrs))]
-#     print('原始文档数量:', len(docs))
-#
-#     # 对文本进行简单的清洗
-#     cleaned_docs = [clean_text(doc) for doc in docs]
-#     print('清洗后文档数量:', len(cleaned_docs))
-#     print('示例文档:', cleaned_docs[0])
-#     print('示例文档:', cleaned_docs[min(10000, len(cleaned_docs)-1)])
-#
-#     # 使用 SBERT 生成嵌入
-#     attr_a = sbert_embed_chinese(cleaned_docs)
-#     initial_embed_path = 'sbert_embeddings_wd_test.pkl'
-#
-#     # 确保保存路径存在
-#     directory = os.path.dirname(initial_embed_path)
-#     if directory:
-#         os.makedirs(directory, exist_ok=True)
-#
-#     # 保存嵌入到文件
-#     with open(initial_embed_path, 'wb') as f:
-#         pickle.dump(attr_a, f)
-#     print(f"Embeddings saved to {initial_embed_path}")
+def preproc(docs, min_len=2, max_len=15):
+    for i in range(len(docs)):
+        docs[i] = [token for token in
+                   utils.tokenize(docs[i],
+                                  lower=True,
+                                  deacc=True,
+                                  errors='ignore')
+                   if min_len <= len(token) <= max_len]
 
+    from nltk.stem.wordnet import WordNetLemmatizer
+    lemmatizer = WordNetLemmatizer()
+    docs = [[lemmatizer.lemmatize(token) for token in doc] for doc in docs]
+    # e.g. years->year, models->model, not including: modeling->modeling
 
-from sklearn.feature_extraction.text import CountVectorizer
+    # NLTK Stop words
+    from nltk.corpus import stopwords
+    stop_words = stopwords.words('english')
+    stop_words.extend(['from', 'subject', 're', 'edu', 'use'])
+    stop_words = set(stop_words)
 
+    docs = [[word for word in document if word not in stop_words] for document in docs]
 
-def embed_wd_bow():
-    # 简化的文本清洗步骤
-    def clean_text(text):
-        # 将繁体中文转换为简体中文
-        text = zhconv.convert(text, 'zh-hans').strip()
-        # 移除不必要的特殊符号，但保留中文、英文和数字
-        text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\s]', '', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
+    # Build the bigram and trigram models
+    bigram = models.Phrases(docs, min_count=5, threshold=0.1)  # higher threshold fewer phrases.
+    trigram = models.Phrases(bigram[docs], threshold=0.1)
 
-    print(time.ctime(), '\tLoading data...')
-    try:
-        g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
-        print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
-        attrs = pickle.load(open('../data/wd/attrs', 'rb'))
-        anchors = dict(json.load(open('../data/wd/anchors.txt', 'r')))
-        print(time.ctime(), '\t # of Anchors:', len(anchors))
-    except FileNotFoundError as e:
-        print(f"Error loading data: {e}")
-        return
+    # Get a sentence clubbed as a trigram/bigram
+    bigram_mod = models.phrases.Phraser(bigram)
+    trigram_mod = models.phrases.Phraser(trigram)
 
-    docs = [attrs[i][2] for i in range(len(attrs))]
-    print('原始文档数量:', len(docs))
+    # Add bigrams and trigrams to docs.
+    docs = [bigram_mod[doc] for doc in docs]
+    docs = [trigram_mod[bigram_mod[doc]] for doc in docs]
 
-    # 对文本进行简单的清洗
-    cleaned_docs = [clean_text(doc) for doc in docs]
-    print('清洗后文档数量:', len(cleaned_docs))
-    print('示例文档:', cleaned_docs[0])
-    print('示例文档:', cleaned_docs[min(10000, len(cleaned_docs) - 1)])
-
-    # 使用词袋模型生成嵌入
-    vectorizer = CountVectorizer(max_features=768)  # 设置最大特征数，可以根据需要调整
-    bow_matrix = vectorizer.fit_transform(cleaned_docs).toarray()
-
-    print('词袋嵌入矩阵的形状:', bow_matrix.shape)
-
-    initial_embed_path = 'bow_embeddings_wd_test.pkl'
-
-    # 确保保存路径存在
-    directory = os.path.dirname(initial_embed_path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-
-    # 保存词袋嵌入到文件
-    with open(initial_embed_path, 'wb') as f:
-        pickle.dump(bow_matrix, f)
-    print(f"Bag-of-Words embeddings saved to {initial_embed_path}")
-
+    return docs
 
 def embed_wd():
     import jieba, zhconv, re
     from gensim.corpora import WikiCorpus
-
     def tokenizer_cn(text, token_min_len=10, token_max_len=100, lower=False):
-        text = zhconv.convert(text, 'zh-hans').strip()  # Standardize to simple Chinese
-        text = p.sub('', text)
+        text = zhconv.convert(text,'zh-hans').strip() #Standardize to simple Chinese
+        text = p.sub('',text)
         return jieba.lcut(text)
 
-    def preproc_cn(docs, min_len=2, max_len=15):
+    def preproc_cn(docs,min_len=2,max_len=15):
         docs = [tokenizer_cn(doc) for doc in docs]
         # Removing Stop words
-        stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
+        stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl','rb'))
         stop_words = set(stop_words)
         docs = [[word for word in document if word not in stop_words] for document in docs]
         return docs
 
-    def topic_embed_cn(docs, dim=768):
-        return topic_embed(docs, dim=dim)
+    # weibo_specific_words = [
+    #     '转发', '评论', '收藏', '点赞', '回复', '关注', '粉丝', '话题', '热搜', '私信', '超话',
+    #     '微博', '热度', '活跃', '年', '月', '日', '分钟', '秒', '刚刚', '昨天', '今天',
+    #     '上午', '下午', '分享', '推广', '用户', '举报', '大V', '认证', '置顶', '转发抽奖',
+    #     '同城', '位置', '地理位置', '微博主', '微博客', '界面', '链接', '直播', '视频',
+    #     '图片', '原创', '编辑', '发微博', '帐号', '主页','赞','来自','客户端','微','脖儿'
+    # ]
+    # def tokenizer_cn(text, token_min_len=10, token_max_len=100, lower=False):
+    #     text = zhconv.convert(text, 'zh-hans').strip()  # Standardize to simple Chinese
+    #     text = p.sub('', text)
+    #     return jieba.lcut(text)
+    #
+    # def remove_weibo_words(doc, weibo_words):
+    #     return [word for word in doc if word not in weibo_words]
+    #
+    # def preproc_cn(docs, min_len=2, max_len=15):
+    #     docs = [tokenizer_cn(doc) for doc in docs]
+    #     # Removing Stop words
+    #     stop_words = pickle.load(open('../data/wd/stop_words_cn.pkl', 'rb'))
+    #     stop_words = set(stop_words)
+    #     docs = [[word for word in document if word not in stop_words] for document in docs]
+    #     all_tokens = [word for doc in docs for word in doc]
+    #     word_counts = Counter(all_tokens)
+    #     valid_words = {word for word, count in word_counts.items() if min_len <= count <= max_len}
+    #     processed_docs = [[word for word in doc if word in valid_words and word not in weibo_specific_words] for doc in
+    #                       docs]
+    #     return processed_docs
+
+
 
     p = re.compile('[^\u4e00-\u9fa5]')
 
     print(time.ctime(), '\tLoading data...')
-    g1, g2 = pickle.load(open('../data/wd/networks', 'rb'))
+    g1, g2 = pickle.load(open('../data/dblp/dblp_1/networks', 'rb'))
     print(time.ctime(), '\t Size of two networks:', len(g1), len(g2))
-    attrs = pickle.load(open('../data/wd/attrs', 'rb'))
-    char_corpus, word_corpus, topic_corpus = [], [], []
+    attrs = pickle.load(open('../data/dblp/dblp_1/attrs', 'rb'))
+    topic_corpus = []
     for i in range(len(attrs)):
         v = attrs[i]
         topic_corpus.append(v[2])
         # The index number is the node id of users in the two networks.
 
-    print(time.ctime(), '\tPreprocessing...')
     topic_corpus = preproc_cn(topic_corpus)
+    # topic_corpus = [' '.join(doc) for doc in topic_corpus]
 
+    # print(topic_corpus[10000])
+    #
+    # print(topic_corpus[15000])
+    #
+    # print(topic_corpus[17000])
     for seed in range(1):
         for d in [768]:
             print(time.ctime(), '\tTopic level attributes embedding...')
-            emb_t = word2vec_embed(topic_corpus, embed_size=d)
+            emb_t = topic_embed(topic_corpus,dim=d)
 
-            # Standardization
-
-            emb_t = (emb_t - np.mean(emb_t, axis=0, keepdims=True)) / np.std(emb_t, axis=0, keepdims=True)
-
+            print(emb_t.shape)
             # Saving embeddings
-            pickle.dump((emb_t), open('../emb/emb_wd_seed_{}_dim_{}'.format(seed, d), 'wb'))
+            pickle.dump(emb_t, open('mauil_a_dblp_1.pkl', 'wb'))
 
 
 
@@ -386,7 +362,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 config = tf.compat.v1.ConfigProto()
 config.gpu_options.allow_growth = True
-inputs = 0
+inputs = 1
 if int(inputs) == 1:
     print('Embedding dataset: dblp')
     embed_dblp()
